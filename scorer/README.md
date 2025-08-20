@@ -7,8 +7,3 @@ A tiny, single-hidden-layer MLP used to score prompts for bandit-style prompt op
 - **EXPO-ES**: scores exemplar embeddings  
   Input dim: 3072, Hidden: 512, Output: scalar
 
-## Requirements
-Python ≥3.10, `torch`, `numpy`, (for tests) `pytest`.
-
-```bash
-pip install torch numpy pytest
