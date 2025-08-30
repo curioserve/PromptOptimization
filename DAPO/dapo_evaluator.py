@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class DAPOEvaluator:
-    def __init__(self, model_id: str = "openai/gpt-oss-20b", max_new_tokens: int = 512, dataset_config: str = "all"):
+    def __init__(self, model_id: str = "./gpt-oss-20b", max_new_tokens: int = 1024, dataset_config: str = "all"):
         """Initialize the DAPO evaluator with model pipeline."""
         self.model_id = model_id
         self.max_new_tokens = max_new_tokens
@@ -29,8 +29,9 @@ class DAPOEvaluator:
         self.results = []
         
     def setup_pipeline(self):
-        """Initialize the model pipeline."""
+        """Initialize the model pipeline with harmony format support."""
         logger.info(f"Loading model: {self.model_id}")
+        logger.info("Using transformers pipeline - harmony format applied automatically")
         try:
             self.pipe = pipeline(
                 "text-generation",
@@ -61,17 +62,25 @@ class DAPOEvaluator:
     
     def extract_answer(self, text: str) -> Optional[str]:
         """Extract the final answer from model output."""
-        # Look for "Answer: " pattern
-        answer_match = re.search(r"Answer:\s*([^\n]+)", text, re.IGNORECASE)
-        if answer_match:
-            return answer_match.group(1).strip()
+        # Multiple answer extraction patterns for better accuracy
+        patterns = [
+            r"Answer:\s*([^\n]+)",
+            r"(?:Therefore|Thus|Hence),?\s*(?:the answer is|answer:)?\s*([^\n]+)",
+            r"\\boxed\{([^}]+)\}",  # LaTeX boxed format
+            r"=\s*([0-9]+(?:\.[0-9]+)?)\s*$",  # Ends with = number
+            r"\b(\d+)\s*$",  # Ends with a number
+        ]
         
-        # Look for final numerical answer or expression
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                return match.group(1).strip()
+        
+        # If no pattern matches, try to extract from last meaningful line
         lines = text.strip().split('\n')
         for line in reversed(lines):
             line = line.strip()
-            if line and not line.startswith('Therefore') and not line.startswith('Thus'):
-                # Try to extract numerical answer
+            if line and len(line) < 50:  # Likely an answer line
                 num_match = re.search(r'\b(\d+(?:\.\d+)?)\b', line)
                 if num_match:
                     return num_match.group(1)
@@ -96,8 +105,8 @@ class DAPOEvaluator:
             outputs = self.pipe(
                 messages,
                 max_new_tokens=self.max_new_tokens,
-                do_sample=True,
-                temperature=0.7,
+                do_sample=False,  # Use greedy decoding for consistent reasoning
+                temperature=1.0,  # Standard temperature for reasoning models
                 pad_token_id=self.pipe.tokenizer.eos_token_id
             )
             inference_time = time.time() - start_time
@@ -107,6 +116,10 @@ class DAPOEvaluator:
                 generated_text = outputs[0]["generated_text"][-1]["content"]
             else:
                 generated_text = outputs[0]["generated_text"]
+                # Remove input from output if present
+                for msg in messages:
+                    if msg["content"] in generated_text:
+                        generated_text = generated_text.replace(msg["content"], "").strip()
             
             # Extract answer
             predicted_answer = self.extract_answer(generated_text)

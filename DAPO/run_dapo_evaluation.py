@@ -11,7 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run DAPO Math dataset evaluation")
     parser.add_argument("--model", default="./gpt-oss-20b", help="Model ID to use")
     parser.add_argument("--samples", type=int, default=10, help="Number of samples to evaluate (None for all)")
-    parser.add_argument("--max_tokens", type=int, default=512, help="Maximum new tokens to generate")
+    parser.add_argument("--max_tokens", type=int, default=1024, help="Maximum new tokens to generate")
     parser.add_argument("--output", default="dapo_results.json", help="Output file path")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--dataset_config", default="all", choices=["all", "en", "cn"], help="Dataset configuration to use")
