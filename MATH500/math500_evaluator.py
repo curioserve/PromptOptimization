@@ -8,6 +8,10 @@ import json
 import logging
 import re
 import time
+import os
+import pandas as pd
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from tqdm import tqdm
 import requests
@@ -31,6 +35,10 @@ class MATH500Evaluator:
         self.subject_filter = subject_filter
         self.pipe = None
         self.all_runs_results = []
+        self.experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.results_dir = Path("results") / f"math500_experiment_{self.experiment_id}"
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Results will be saved to: {self.results_dir}")
         
     def setup_pipeline(self):
         """Initialize the model pipeline with harmony format support."""
@@ -367,23 +375,31 @@ class MATH500Evaluator:
         variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
         return variance ** 0.5
     
-    def save_results(self, output_path: str = "math500_evaluation_results.json"):
-        """Save evaluation results to JSON file."""
+    def save_results(self, output_path: Optional[str] = None):
+        """Save comprehensive evaluation results with detailed per-run tracking."""
         if not self.all_runs_results:
             logger.warning("No results to save. Run evaluation first.")
             return
+        
+        # Use experiment-specific directory if no path provided
+        if output_path is None:
+            output_path = self.results_dir / "complete_results.json"
         
         # Calculate overall statistics
         all_accuracies = [run['summary']['accuracy'] for run in self.all_runs_results]
         all_inference_times = [run['summary']['avg_inference_time'] for run in self.all_runs_results]
         
+        # Create comprehensive output data
         output_data = {
-            'evaluation_metadata': {
+            'experiment_metadata': {
+                'experiment_id': self.experiment_id,
+                'timestamp': datetime.now().isoformat(),
                 'model_id': self.model_id,
                 'max_new_tokens': self.max_new_tokens,
                 'subject_filter': self.subject_filter,
                 'num_runs': len(self.all_runs_results),
-                'samples_per_run': len(self.all_runs_results[0]['results']) if self.all_runs_results else 0
+                'samples_per_run': len(self.all_runs_results[0]['results']) if self.all_runs_results else 0,
+                'total_samples_evaluated': sum(len(run['results']) for run in self.all_runs_results)
             },
             'overall_statistics': {
                 'accuracy': {
@@ -404,10 +420,24 @@ class MATH500Evaluator:
             'individual_runs': self.all_runs_results
         }
         
+        # Save main results file
         with open(output_path, 'w') as f:
             json.dump(output_data, f, indent=2)
         
-        logger.info(f"Results saved to {output_path}")
+        # Save individual run files
+        self._save_individual_run_files()
+        
+        # Create cross-run comparison table
+        self._create_cross_run_comparison()
+        
+        # Create summary statistics file
+        self._create_summary_statistics()
+        
+        # Create subject-wise analysis if applicable
+        self._create_subject_analysis()
+        
+        logger.info(f"Comprehensive results saved to: {self.results_dir}")
+        logger.info(f"Main results file: {output_path}")
     
     def print_sample_results(self, num_samples: int = 5, run_number: int = 1):
         """Print a few sample results for inspection."""
@@ -438,6 +468,167 @@ class MATH500Evaluator:
                 print(f"Error: {result['error']}")
 
 
+    def _save_individual_run_files(self):
+        """Save detailed results for each individual run."""
+        runs_dir = self.results_dir / "individual_runs"
+        runs_dir.mkdir(exist_ok=True)
+        
+        for run_data in self.all_runs_results:
+            run_num = run_data['run_number']
+            run_file = runs_dir / f"run_{run_num:02d}_detailed.json"
+            
+            with open(run_file, 'w') as f:
+                json.dump(run_data, f, indent=2)
+            
+            # Also save as CSV for easy analysis
+            csv_file = runs_dir / f"run_{run_num:02d}_results.csv"
+            df = pd.DataFrame(run_data['results'])
+            df.to_csv(csv_file, index=False)
+    
+    def _create_cross_run_comparison(self):
+        """Create a table showing which questions were answered correctly in each run."""
+        if not self.all_runs_results or len(self.all_runs_results) < 2:
+            return
+        
+        # Get all questions (assuming same questions across runs)
+        first_run_results = self.all_runs_results[0]['results']
+        num_questions = len(first_run_results)
+        
+        # Create comparison data
+        comparison_data = []
+        for i in range(num_questions):
+            row = {
+                'question_id': i + 1,
+                'problem': first_run_results[i]['problem'][:100] + "...",
+                'subject': first_run_results[i]['subject'],
+                'level': first_run_results[i]['level'],
+                'ground_truth': first_run_results[i]['ground_truth']
+            }
+            
+            # Add correctness for each run
+            for run_data in self.all_runs_results:
+                run_num = run_data['run_number']
+                is_correct = run_data['results'][i]['is_correct']
+                predicted = run_data['results'][i]['predicted_answer']
+                row[f'run_{run_num}_correct'] = '✓' if is_correct else '✗'
+                row[f'run_{run_num}_answer'] = predicted
+            
+            # Calculate consistency metrics
+            correct_runs = sum(1 for run_data in self.all_runs_results 
+                             if run_data['results'][i]['is_correct'])
+            row['correct_count'] = correct_runs
+            row['consistency'] = f"{correct_runs}/{len(self.all_runs_results)}"
+            row['is_consistent'] = correct_runs == 0 or correct_runs == len(self.all_runs_results)
+            
+            comparison_data.append(row)
+        
+        # Save as CSV
+        comparison_df = pd.DataFrame(comparison_data)
+        comparison_file = self.results_dir / "cross_run_comparison.csv"
+        comparison_df.to_csv(comparison_file, index=False)
+        
+        # Save inconsistent questions separately
+        inconsistent_df = comparison_df[~comparison_df['is_consistent']]
+        if not inconsistent_df.empty:
+            inconsistent_file = self.results_dir / "inconsistent_questions.csv"
+            inconsistent_df.to_csv(inconsistent_file, index=False)
+            logger.info(f"Found {len(inconsistent_df)} inconsistent questions (saved to inconsistent_questions.csv)")
+        
+        logger.info(f"Cross-run comparison saved to: {comparison_file}")
+    
+    def _create_summary_statistics(self):
+        """Create a summary statistics file with key metrics."""
+        if not self.all_runs_results:
+            return
+        
+        summary_stats = {
+            'experiment_overview': {
+                'experiment_id': self.experiment_id,
+                'model': self.model_id,
+                'subject_filter': self.subject_filter,
+                'num_runs': len(self.all_runs_results),
+                'samples_per_run': len(self.all_runs_results[0]['results']) if self.all_runs_results else 0
+            },
+            'accuracy_analysis': {
+                'per_run_accuracy': [run['summary']['accuracy'] for run in self.all_runs_results],
+                'mean_accuracy': sum(run['summary']['accuracy'] for run in self.all_runs_results) / len(self.all_runs_results),
+                'accuracy_std': self._calculate_std([run['summary']['accuracy'] for run in self.all_runs_results]),
+                'min_accuracy': min(run['summary']['accuracy'] for run in self.all_runs_results),
+                'max_accuracy': max(run['summary']['accuracy'] for run in self.all_runs_results)
+            },
+            'timing_analysis': {
+                'per_run_avg_time': [run['summary']['avg_inference_time'] for run in self.all_runs_results],
+                'overall_avg_time': sum(run['summary']['avg_inference_time'] for run in self.all_runs_results) / len(self.all_runs_results),
+                'time_std': self._calculate_std([run['summary']['avg_inference_time'] for run in self.all_runs_results])
+            }
+        }
+        
+        # Add consistency analysis if multiple runs
+        if len(self.all_runs_results) > 1:
+            # Calculate question-level consistency
+            num_questions = len(self.all_runs_results[0]['results'])
+            consistent_questions = 0
+            
+            for i in range(num_questions):
+                correct_runs = sum(1 for run_data in self.all_runs_results 
+                                 if run_data['results'][i]['is_correct'])
+                if correct_runs == 0 or correct_runs == len(self.all_runs_results):
+                    consistent_questions += 1
+            
+            summary_stats['consistency_analysis'] = {
+                'consistent_questions': consistent_questions,
+                'inconsistent_questions': num_questions - consistent_questions,
+                'consistency_rate': consistent_questions / num_questions if num_questions > 0 else 0
+            }
+        
+        # Save summary
+        summary_file = self.results_dir / "summary_statistics.json"
+        with open(summary_file, 'w') as f:
+            json.dump(summary_stats, f, indent=2)
+        
+        logger.info(f"Summary statistics saved to: {summary_file}")
+    
+    def _create_subject_analysis(self):
+        """Create subject-wise performance analysis."""
+        if not self.all_runs_results:
+            return
+        
+        # Collect all results across runs
+        all_results = []
+        for run_data in self.all_runs_results:
+            for result in run_data['results']:
+                result_copy = result.copy()
+                result_copy['run_number'] = run_data['run_number']
+                all_results.append(result_copy)
+        
+        df = pd.DataFrame(all_results)
+        
+        if 'subject' in df.columns:
+            # Subject-wise accuracy
+            subject_stats = df.groupby('subject').agg({
+                'is_correct': ['count', 'sum', 'mean'],
+                'inference_time': 'mean',
+                'level': 'mean'
+            }).round(3)
+            
+            subject_stats.columns = ['total_questions', 'correct_answers', 'accuracy', 'avg_inference_time', 'avg_level']
+            subject_file = self.results_dir / "subject_analysis.csv"
+            subject_stats.to_csv(subject_file)
+            
+            # Level-wise accuracy
+            if 'level' in df.columns:
+                level_stats = df.groupby('level').agg({
+                    'is_correct': ['count', 'sum', 'mean'],
+                    'inference_time': 'mean'
+                }).round(3)
+                
+                level_stats.columns = ['total_questions', 'correct_answers', 'accuracy', 'avg_inference_time']
+                level_file = self.results_dir / "level_analysis.csv"
+                level_stats.to_csv(level_file)
+            
+            logger.info(f"Subject and level analysis saved to CSV files")
+
+
 def main():
     """Main evaluation function."""
     # Configuration
@@ -448,6 +639,7 @@ def main():
     
     # Initialize evaluator
     evaluator = MATH500Evaluator(model_id=MODEL_ID, max_new_tokens=MAX_NEW_TOKENS)
+    logger.info(f"Starting MATH500 evaluation experiment: {evaluator.experiment_id}")
     
     try:
         # Run multiple evaluations
