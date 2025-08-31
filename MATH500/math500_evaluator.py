@@ -695,8 +695,8 @@ def main():
     """Main evaluation function."""
     # Configuration
     MODEL_ID = "./gpt-oss-20b"
-    NUM_SAMPLES = 20  # Set to None to evaluate all samples
-    NUM_RUNS = 3     # Number of evaluation runs
+    NUM_SAMPLES = None  # Set to None to evaluate all samples
+    NUM_RUNS = 1     # Number of evaluation runs
     MAX_NEW_TOKENS = 1024
     
     # Initialize evaluator
