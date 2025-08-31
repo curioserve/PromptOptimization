@@ -237,19 +237,75 @@ class MATH500Evaluator:
         return lines[-1].strip() if lines else ""
     
     def check_correctness(self, predicted: str, ground_truth: str) -> bool:
-        """Check if the predicted answer matches the ground truth."""
+        """Check if the predicted answer matches the ground truth using LLM comparison."""
         if not predicted or not ground_truth:
             return False
         
-        # Normalize both answers
+        # First try simple string matching as a fast path
+        if predicted.strip().lower() == ground_truth.strip().lower():
+            return True
+        
+        # Use LLM to compare mathematical equivalence
+        return self._llm_compare_answers(predicted, ground_truth)
+    
+    def _llm_compare_answers(self, predicted: str, ground_truth: str) -> bool:
+        """Use the LLM to determine if two mathematical answers are equivalent."""
+        try:
+            comparison_prompt = f"""Are these two mathematical answers equivalent? Answer only "YES" or "NO".
+
+Predicted answer: {predicted}
+Ground truth answer: {ground_truth}
+
+Consider mathematical equivalence (e.g., 1/2 = 0.5, π/2 = 1.5708..., (3, π/2) = (3, 1.5708...)).
+Ignore formatting differences like LaTeX vs plain text.
+
+Answer:"""
+
+            messages = [{"role": "user", "content": comparison_prompt}]
+            
+            outputs = self.pipe(
+                messages,
+                max_new_tokens=10,
+                do_sample=False,
+                temperature=0.0,
+                pad_token_id=self.pipe.tokenizer.eos_token_id
+            )
+            
+            # Extract response
+            response = ""
+            generated_text = outputs[0]["generated_text"]
+            if isinstance(generated_text, list):
+                for msg in generated_text:
+                    if msg.get("role") == "assistant":
+                        response = msg.get("content", "").strip().upper()
+                        break
+            else:
+                response = str(generated_text).strip().upper()
+            
+            # Look for YES/NO in the response
+            if "YES" in response:
+                return True
+            elif "NO" in response:
+                return False
+            else:
+                # Fallback to rule-based comparison if LLM response is unclear
+                logger.warning(f"Unclear LLM comparison response: {response}. Using fallback.")
+                return self._fallback_comparison(predicted, ground_truth)
+                
+        except Exception as e:
+            logger.warning(f"LLM comparison failed: {e}. Using fallback.")
+            return self._fallback_comparison(predicted, ground_truth)
+    
+    def _fallback_comparison(self, predicted: str, ground_truth: str) -> bool:
+        """Fallback rule-based comparison when LLM comparison fails."""
+        # Simple normalization and comparison
         pred_clean = re.sub(r'[^\w\d\.\-\+\(\)\[\]/\\]', '', predicted.lower())
         gt_clean = re.sub(r'[^\w\d\.\-\+\(\)\[\]/\\]', '', ground_truth.lower())
         
-        # Direct string match
         if pred_clean == gt_clean:
             return True
         
-        # Try to extract numeric values and compare
+        # Try numeric comparison
         try:
             pred_num = float(pred_clean)
             gt_num = float(gt_clean)
@@ -257,8 +313,9 @@ class MATH500Evaluator:
         except ValueError:
             pass
         
-        # Check if prediction contains ground truth
-        return gt_clean in pred_clean
+        # Check containment
+        return gt_clean in pred_clean or pred_clean in gt_clean
+    
     
     def evaluate_single_run(self, num_samples: Optional[int] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """Evaluate the dataset in a single run."""
