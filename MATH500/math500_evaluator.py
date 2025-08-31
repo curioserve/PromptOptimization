@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from tqdm import tqdm
 import requests
 from transformers import pipeline
+from datasets import load_dataset
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -58,39 +59,43 @@ class MATH500Evaluator:
             raise
     
     def load_dataset(self, num_samples: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Load MATH500 dataset from URL."""
-        logger.info("Loading MATH500 dataset...")
-        
-        # MATH500 dataset URL
-        url = "https://raw.githubusercontent.com/hendrycks/math/main/math_test.jsonl"
+        """Load MATH500 dataset from HuggingFace."""
+        logger.info("Loading MATH500 dataset from HuggingFace...")
         
         try:
-            response = requests.get(url)
-            response.raise_for_status()
+            # Load the MATH-500 dataset from HuggingFace
+            dataset = load_dataset("HuggingFaceH4/MATH-500", split="test")
             
-            # Parse JSONL format
-            dataset = []
-            for line in response.text.strip().split('\n'):
-                if line.strip():
-                    item = json.loads(line)
-                    dataset.append(item)
+            # Convert to list of dictionaries
+            dataset_list = []
+            for item in dataset:
+                # Map HuggingFace format to our expected format
+                dataset_item = {
+                    "problem": item.get("problem", ""),
+                    "solution": item.get("solution", ""),
+                    "answer": item.get("answer", ""),
+                    "subject": item.get("type", ""),  # HF uses 'type' instead of 'subject'
+                    "level": item.get("level", 0),
+                    "unique_id": item.get("unique_id", "")
+                }
+                dataset_list.append(dataset_item)
             
             # Apply subject filter if specified
             if self.subject_filter:
-                dataset = [item for item in dataset if item.get('subject', '').lower() == self.subject_filter.lower()]
-                logger.info(f"Filtered dataset to {len(dataset)} samples for subject: {self.subject_filter}")
+                dataset_list = [item for item in dataset_list if item.get('subject', '').lower() == self.subject_filter.lower()]
+                logger.info(f"Filtered dataset to {len(dataset_list)} samples for subject: {self.subject_filter}")
             
             # Limit samples if specified
             if num_samples is not None:
-                dataset = dataset[:num_samples]
-                logger.info(f"Limited dataset to {len(dataset)} samples")
+                dataset_list = dataset_list[:num_samples]
+                logger.info(f"Limited dataset to {len(dataset_list)} samples")
             
-            logger.info(f"Loaded {len(dataset)} samples from MATH500 dataset")
-            return dataset
+            logger.info(f"Loaded {len(dataset_list)} samples from MATH500 dataset")
+            return dataset_list
             
         except Exception as e:
-            logger.error(f"Failed to load MATH500 dataset: {e}")
-            # Fallback to local sample data if URL fails
+            logger.error(f"Failed to load MATH500 dataset from HuggingFace: {e}")
+            # Fallback to local sample data if HuggingFace fails
             logger.info("Using fallback sample data...")
             return self._get_sample_data()[:num_samples] if num_samples else self._get_sample_data()
     
