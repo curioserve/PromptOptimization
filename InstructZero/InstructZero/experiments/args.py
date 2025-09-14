@@ -54,7 +54,31 @@ def parse_args():
         "--api_model",
         type=str,
         default='chatgpt',
-        help="The black-box api model."    
+        help="The black-box api model. Choices: chatgpt, local_hf"    
+    )
+    parser.add_argument(
+        "--bb_hf_path",
+        type=str,
+        default=None,
+        help="Path to local HF model to use when --api_model local_hf"
+    )
+    parser.add_argument(
+        "--bb_batch_size",
+        type=int,
+        default=2,
+        help="Batch size for local HF black-box evaluator"
+    )
+    parser.add_argument(
+        "--bb_max_new_tokens",
+        type=int,
+        default=256,
+        help="Max new tokens for local HF black-box evaluator"
+    )
+    parser.add_argument(
+        "--bb_torch_dtype",
+        type=str,
+        default='float16',
+        help="torch dtype for local HF black-box evaluator: float16|bfloat16|float32"
     )
     parser.add_argument(
         "--model_name",
