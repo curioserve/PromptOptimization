@@ -2,3 +2,4 @@ gpt-oss-20b/
 venv/
 **/__pycache__/
 *.pyc
+gpt-oss-120b/

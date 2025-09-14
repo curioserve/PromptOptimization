@@ -11,7 +11,7 @@ TASKS=[
     'second_word_letter', 'sentence_similarity', 'sentiment', 'orthography_starts_with',
     'sum', 'synonyms', 'translation_en-de', 'translation_en-es',
     'translation_en-fr', 'word_in_context', 'auto_categorization', 'auto_debugging', 'ascii', 'cs_algorithms',
-    'periodic_elements', 'word_sorting', 'word_unscrambling', 'odd_one_out', 'object_count'
+    'periodic_elements', 'word_sorting', 'word_unscrambling', 'odd_one_out', 'object_count','math500_highconf'
 ]
 
 
