@@ -89,8 +89,7 @@ class LMForwardAPI:
                 arch = args.hf_arch.lower()
                 if arch == 'gpt_neox':
                     from transformers import GPTNeoXForCausalLM
-                    kwargs_model = dict(
-                        HF_cache_dir,
+                    extra = dict(
                         low_cpu_mem_usage=True,
                         device_map="auto",
                         trust_remote_code=True,
@@ -98,12 +97,11 @@ class LMForwardAPI:
                         **kwargs,
                     )
                     if config is not None:
-                        kwargs_model["config"] = config
-                    self.model = GPTNeoXForCausalLM.from_pretrained(**kwargs_model)
+                        extra["config"] = config
+                    self.model = GPTNeoXForCausalLM.from_pretrained(HF_cache_dir, **extra)
                 elif arch == 'llama':
                     from transformers import LlamaForCausalLM
-                    kwargs_model = dict(
-                        HF_cache_dir,
+                    extra = dict(
                         low_cpu_mem_usage=True,
                         device_map="auto",
                         trust_remote_code=True,
@@ -111,12 +109,11 @@ class LMForwardAPI:
                         **kwargs,
                     )
                     if config is not None:
-                        kwargs_model["config"] = config
-                    self.model = LlamaForCausalLM.from_pretrained(**kwargs_model)
+                        extra["config"] = config
+                    self.model = LlamaForCausalLM.from_pretrained(HF_cache_dir, **extra)
                 else:
                     # Fallback to auto with trust_remote_code
-                    kwargs_model = dict(
-                        HF_cache_dir,
+                    extra = dict(
                         low_cpu_mem_usage=True,
                         device_map="auto",
                         trust_remote_code=True,
@@ -124,12 +121,11 @@ class LMForwardAPI:
                         **kwargs,
                     )
                     if config is not None:
-                        kwargs_model["config"] = config
-                    self.model = AutoModelForCausalLM.from_pretrained(**kwargs_model)
+                        extra["config"] = config
+                    self.model = AutoModelForCausalLM.from_pretrained(HF_cache_dir, **extra)
             else:
                 # Auto path with trust_remote_code to handle custom model_type values
-                kwargs_model = dict(
-                    HF_cache_dir,
+                extra = dict(
                     low_cpu_mem_usage=True,
                     device_map="auto",
                     trust_remote_code=True,
@@ -137,18 +133,8 @@ class LMForwardAPI:
                     **kwargs,
                 )
                 if config is not None:
-                    kwargs_model["config"] = config
-                self.model = AutoModelForCausalLM.from_pretrained(**kwargs_model)
-
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                                HF_cache_dir,
-                                model_max_length=1024,
-                                padding_side="left",
-                                use_fast=False,
-                                trust_remote_code=True,
-                            )
-            if self.tokenizer.pad_token is None and hasattr(self.tokenizer, 'eos_token'):
-                self.tokenizer.pad_token = self.tokenizer.eos_token
+                    extra["config"] = config
+                self.model = AutoModelForCausalLM.from_pretrained(HF_cache_dir, **extra)
         else:
             raise NotImplementedError
 
