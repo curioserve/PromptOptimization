@@ -4,7 +4,12 @@ import time
 from tqdm import tqdm
 from abc import ABC, abstractmethod
 from transformers import LlamaForCausalLM, LlamaTokenizer
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, AutoConfig
+try:
+    from transformers import BitsAndBytesConfig
+except Exception:
+    BitsAndBytesConfig = None
+from transformers import AutoModelForCausalLM
 import openai
 import torch
 import asyncio
@@ -60,6 +65,8 @@ def model_from_config(config, disable_tqdm=True):
         return GPT_Insert(config, disable_tqdm=disable_tqdm)
     elif model_type == "Llama_Forward":
         return Llama_Forward(config, disable_tqdm=disable_tqdm)
+    elif model_type == "LocalHF_Forward":
+        return LocalHF_Forward(config, disable_tqdm=disable_tqdm)
     raise ValueError(f"Unknown model type: {model_type}")
 
 
@@ -629,7 +636,6 @@ class Claude_Forward(LLM):
             text = [prompt]
         config = self.config['gpt_config'].copy()
         config['n'] = n
-        answer = []
         # If there are any [APE] tokens in the prompts, remove them
         for i in range(len(prompt)):
             prompt_single = prompt[i].replace('[APE]', '').strip()
@@ -833,7 +839,7 @@ class GPT_Insert(LLM):
                           for i in range(0, len(prompt), batch_size)]
         if not self.disable_tqdm:
             print(
-                f"[{self.config['name']}] Generating {len(prompt) * n} completions, split into {len(prompt_batches)} batches of (maximum) size {batch_size * n}")
+                f"[{self.config['name']}] Generating {len(prompt) * n} completions, split into {len(prompt_batches)} batches of size {batch_size * n}")
         text = []
         for prompt_batch in tqdm(prompt_batches, disable=self.disable_tqdm):
             text += self.auto_reduce_n(self.__generate_text, prompt_batch, n)
@@ -890,3 +896,77 @@ def gpt_get_estimated_cost(config, prompt, max_tokens):
 
 class BatchSizeException(Exception):
     pass
+
+
+class LocalHF_Forward(LLM):
+    """Generic wrapper for a local Hugging Face causal LM used as a black-box LLM."""
+
+    def __init__(self, config, needs_confirmation=False, disable_tqdm=True):
+        """Initializes the model."""
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        self.config = config
+        self.needs_confirmation = needs_confirmation
+        self.disable_tqdm = disable_tqdm
+        hf_path = config.get('hf_path')
+        assert hf_path is not None and len(hf_path) > 0, "'hf_path' must be set in config['model'] for LocalHF_Forward"
+        dtype = config.get('torch_dtype', 'float16')
+        torch_dtype = torch.float16 if dtype == 'float16' else torch.bfloat16 if dtype == 'bfloat16' else torch.float32
+
+        # Optional quantization
+        bnb_config = None
+        if config.get('load_in_8bit') or config.get('load_in_4bit'):
+            assert BitsAndBytesConfig is not None, "bitsandbytes is required for 8/4-bit loading; please install it."
+            compute_dtype = torch.float16 if config.get('bnb_compute_dtype', 'float16') == 'float16' else torch.bfloat16
+            bnb_config = BitsAndBytesConfig(
+                load_in_8bit=bool(config.get('load_in_8bit')),
+                load_in_4bit=bool(config.get('load_in_4bit')),
+                bnb_4bit_compute_dtype=compute_dtype,
+                bnb_4bit_quant_type=config.get('bnb_quant_type', 'nf4'),
+            )
+
+        device_map = config.get('device_map', 'auto')
+
+        # Try to load config; handle custom model_type
+        cfg = None
+        try:
+            tmp = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+            # strip stale quantization_config if not using bnb
+            if bnb_config is None and hasattr(tmp, 'quantization_config'):
+                try:
+                    delattr(tmp, 'quantization_config')
+                except Exception:
+                    tmp.quantization_config = None
+            cfg = tmp
+        except Exception:
+            cfg = None
+
+        extra = dict(
+            device_map=device_map,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+            quantization_config=bnb_config,
+        )
+        if cfg is not None:
+            extra['config'] = cfg
+        self.model = AutoModelForCausalLM.from_pretrained(hf_path, **extra)
+        self.tokenizer = AutoTokenizer.from_pretrained(hf_path, padding_side="left", use_fast=False, trust_remote_code=True)
+        if self.tokenizer.pad_token is None:
+            # Fallback: set pad token to eos if missing
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def generate_text(self, prompts, n):
+        if not isinstance(prompts, list):
+            prompts = [prompts]
+        max_new = self.config.get('max_new_tokens', 256)
+        temperature = self.config.get('temperature', 0.0)
+        batch_size = self.config.get('batch_size', 2)
+        texts = []
+        for i in range(0, len(prompts), batch_size):
+            batch = prompts[i:i+batch_size]
+            inputs = self.tokenizer(batch, return_tensors="pt", padding=True).to(self.model.device)
+            with torch.no_grad():
+                gen = self.model.generate(**inputs, max_new_tokens=max_new, do_sample=False if temperature==0 else True, temperature=temperature)
+            outs = self.tokenizer.batch_decode(gen, skip_special_tokens=True)
+            texts.extend(outs)
+        return texts
