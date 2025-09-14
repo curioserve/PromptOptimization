@@ -13,12 +13,17 @@ from misc import get_test_conf, get_conf
 from torch.quasirandom import SobolEngine
 from botorch.models import SingleTaskGP
 from gpytorch.mlls import ExactMarginalLogLikelihood
+# Compat import for BoTorch fit util across versions
 try:
-    # Newer BoTorch
-    from botorch.fit import fit_gpytorch_model
+    # Newest API
+    from botorch.optim.fit import fit_gpytorch_mll as fit_gpytorch_model
 except Exception:
-    # Fallback for very old versions
-    from botorch import fit_gpytorch_model
+    try:
+        # Mid versions
+        from botorch.fit import fit_gpytorch_model
+    except Exception:
+        # Oldest fallback
+        from botorch import fit_gpytorch_model
 from botorch.acquisition.analytic import ExpectedImprovement
 from gpytorch.kernels import ScaleKernel, MaternKernel
 from gpytorch.priors import GammaPrior
