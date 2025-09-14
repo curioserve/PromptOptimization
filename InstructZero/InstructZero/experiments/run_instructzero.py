@@ -68,63 +68,77 @@ class LMForwardAPI:
                 )
 
             # Load config first to strip unexpected quantization_config if not using bnb
-            config = AutoConfig.from_pretrained(
-                HF_cache_dir,
-                trust_remote_code=True,
-            )
-            if bnb_config is None and hasattr(config, 'quantization_config'):
-                # Remove stale quantization_config to avoid bitsandbytes requirement
-                try:
-                    delattr(config, 'quantization_config')
-                except Exception:
-                    config.quantization_config = None
+            config = None
+            try:
+                cfg = AutoConfig.from_pretrained(
+                    HF_cache_dir,
+                    trust_remote_code=True,
+                )
+                if bnb_config is None and hasattr(cfg, 'quantization_config'):
+                    # Remove stale quantization_config to avoid bitsandbytes requirement
+                    try:
+                        delattr(cfg, 'quantization_config')
+                    except Exception:
+                        cfg.quantization_config = None
+                config = cfg
+            except KeyError:
+                # Unknown model_type in config; proceed without explicit config
+                config = None
 
             if self.ops_model == 'hf' and hasattr(args, 'hf_arch') and args.hf_arch and args.hf_arch != 'auto':
                 arch = args.hf_arch.lower()
                 if arch == 'gpt_neox':
                     from transformers import GPTNeoXForCausalLM
-                    self.model = GPTNeoXForCausalLM.from_pretrained(
+                    kwargs_model = dict(
                         HF_cache_dir,
                         low_cpu_mem_usage=True,
                         device_map="auto",
                         trust_remote_code=True,
                         quantization_config=bnb_config,
-                        config=config,
                         **kwargs,
                     )
+                    if config is not None:
+                        kwargs_model["config"] = config
+                    self.model = GPTNeoXForCausalLM.from_pretrained(**kwargs_model)
                 elif arch == 'llama':
                     from transformers import LlamaForCausalLM
-                    self.model = LlamaForCausalLM.from_pretrained(
+                    kwargs_model = dict(
                         HF_cache_dir,
                         low_cpu_mem_usage=True,
                         device_map="auto",
                         trust_remote_code=True,
                         quantization_config=bnb_config,
-                        config=config,
                         **kwargs,
                     )
+                    if config is not None:
+                        kwargs_model["config"] = config
+                    self.model = LlamaForCausalLM.from_pretrained(**kwargs_model)
                 else:
                     # Fallback to auto with trust_remote_code
-                    self.model = AutoModelForCausalLM.from_pretrained(
+                    kwargs_model = dict(
                         HF_cache_dir,
                         low_cpu_mem_usage=True,
                         device_map="auto",
                         trust_remote_code=True,
                         quantization_config=bnb_config,
-                        config=config,
                         **kwargs,
                     )
+                    if config is not None:
+                        kwargs_model["config"] = config
+                    self.model = AutoModelForCausalLM.from_pretrained(**kwargs_model)
             else:
                 # Auto path with trust_remote_code to handle custom model_type values
-                self.model = AutoModelForCausalLM.from_pretrained(
+                kwargs_model = dict(
                     HF_cache_dir,
                     low_cpu_mem_usage=True,
                     device_map="auto",
                     trust_remote_code=True,
                     quantization_config=bnb_config,
-                    config=config,
                     **kwargs,
                 )
+                if config is not None:
+                    kwargs_model["config"] = config
+                self.model = AutoModelForCausalLM.from_pretrained(**kwargs_model)
 
             self.tokenizer = AutoTokenizer.from_pretrained(
                                 HF_cache_dir,
