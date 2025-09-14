@@ -86,5 +86,11 @@ def parse_args():
         default='vicuna',
         help="The model name of the open-source LLM."    
     )
+    parser.add_argument(
+        "--hf_arch",
+        type=str,
+        default='auto',
+        help="When --model_name hf: architecture hint for loading. Options: auto, gpt_neox, llama, mpt"
+    )
     args = parser.parse_args()
     return args

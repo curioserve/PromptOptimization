@@ -50,19 +50,54 @@ class LMForwardAPI:
         self.ops_model = model_name
         # import pdb; pdb.set_trace()
         if self.ops_model in ["vicuna", "wizardlm", 'openchat', 'hf']:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                HF_cache_dir,
-                low_cpu_mem_usage=True,
-                device_map="auto",
-                **kwargs,
-            )
+            if self.ops_model == 'hf' and hasattr(args, 'hf_arch') and args.hf_arch and args.hf_arch != 'auto':
+                arch = args.hf_arch.lower()
+                if arch == 'gpt_neox':
+                    from transformers import GPTNeoXForCausalLM
+                    self.model = GPTNeoXForCausalLM.from_pretrained(
+                        HF_cache_dir,
+                        low_cpu_mem_usage=True,
+                        device_map="auto",
+                        trust_remote_code=True,
+                        **kwargs,
+                    )
+                elif arch == 'llama':
+                    from transformers import LlamaForCausalLM
+                    self.model = LlamaForCausalLM.from_pretrained(
+                        HF_cache_dir,
+                        low_cpu_mem_usage=True,
+                        device_map="auto",
+                        trust_remote_code=True,
+                        **kwargs,
+                    )
+                else:
+                    # Fallback to auto with trust_remote_code
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        HF_cache_dir,
+                        low_cpu_mem_usage=True,
+                        device_map="auto",
+                        trust_remote_code=True,
+                        **kwargs,
+                    )
+            else:
+                # Auto path with trust_remote_code to handle custom model_type values
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    HF_cache_dir,
+                    low_cpu_mem_usage=True,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    **kwargs,
+                )
 
             self.tokenizer = AutoTokenizer.from_pretrained(
                                 HF_cache_dir,
                                 model_max_length=1024,
                                 padding_side="left",
                                 use_fast=False,
+                                trust_remote_code=True,
                             )
+            if self.tokenizer.pad_token is None and hasattr(self.tokenizer, 'eos_token'):
+                self.tokenizer.pad_token = self.tokenizer.eos_token
         else:
             raise NotImplementedError
 
