@@ -92,5 +92,27 @@ def parse_args():
         default='auto',
         help="When --model_name hf: architecture hint for loading. Options: auto, gpt_neox, llama, mpt"
     )
+    parser.add_argument(
+        "--load_in_8bit",
+        action='store_true',
+        help="Load local HF model in 8-bit (requires bitsandbytes)"
+    )
+    parser.add_argument(
+        "--load_in_4bit",
+        action='store_true',
+        help="Load local HF model in 4-bit NF4 (requires bitsandbytes)"
+    )
+    parser.add_argument(
+        "--bnb_compute_dtype",
+        type=str,
+        default='float16',
+        help="bitsandbytes compute dtype when using 4-bit: float16 or bfloat16"
+    )
+    parser.add_argument(
+        "--bnb_quant_type",
+        type=str,
+        default='nf4',
+        help="bitsandbytes 4-bit quant type: nf4 or fp4"
+    )
     args = parser.parse_args()
     return args

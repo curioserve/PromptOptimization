@@ -4,6 +4,11 @@ import numpy as np
 import copy
 from automatic_prompt_engineer import ape, data
 from data.instruction_induction.load_data import load_data
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+try:
+    from transformers import BitsAndBytesConfig
+except Exception:
+    BitsAndBytesConfig = None
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from automatic_prompt_engineer import evaluate, config, template, data
 import os
@@ -50,6 +55,30 @@ class LMForwardAPI:
         self.ops_model = model_name
         # import pdb; pdb.set_trace()
         if self.ops_model in ["vicuna", "wizardlm", 'openchat', 'hf']:
+            # Prepare optional quantization config
+            bnb_config = None
+            if getattr(args, 'load_in_8bit', False) or getattr(args, 'load_in_4bit', False):
+                assert BitsAndBytesConfig is not None, "bitsandbytes is required for 8/4-bit loading; please install it and try again."
+                compute_dtype = torch.float16 if getattr(args, 'bnb_compute_dtype', 'float16') == 'float16' else torch.bfloat16
+                bnb_config = BitsAndBytesConfig(
+                    load_in_8bit=getattr(args, 'load_in_8bit', False),
+                    load_in_4bit=getattr(args, 'load_in_4bit', False),
+                    bnb_4bit_compute_dtype=compute_dtype,
+                    bnb_4bit_quant_type=getattr(args, 'bnb_quant_type', 'nf4'),
+                )
+
+            # Load config first to strip unexpected quantization_config if not using bnb
+            config = AutoConfig.from_pretrained(
+                HF_cache_dir,
+                trust_remote_code=True,
+            )
+            if bnb_config is None and hasattr(config, 'quantization_config'):
+                # Remove stale quantization_config to avoid bitsandbytes requirement
+                try:
+                    delattr(config, 'quantization_config')
+                except Exception:
+                    config.quantization_config = None
+
             if self.ops_model == 'hf' and hasattr(args, 'hf_arch') and args.hf_arch and args.hf_arch != 'auto':
                 arch = args.hf_arch.lower()
                 if arch == 'gpt_neox':
@@ -59,6 +88,8 @@ class LMForwardAPI:
                         low_cpu_mem_usage=True,
                         device_map="auto",
                         trust_remote_code=True,
+                        quantization_config=bnb_config,
+                        config=config,
                         **kwargs,
                     )
                 elif arch == 'llama':
@@ -68,6 +99,8 @@ class LMForwardAPI:
                         low_cpu_mem_usage=True,
                         device_map="auto",
                         trust_remote_code=True,
+                        quantization_config=bnb_config,
+                        config=config,
                         **kwargs,
                     )
                 else:
@@ -77,6 +110,8 @@ class LMForwardAPI:
                         low_cpu_mem_usage=True,
                         device_map="auto",
                         trust_remote_code=True,
+                        quantization_config=bnb_config,
+                        config=config,
                         **kwargs,
                     )
             else:
@@ -86,6 +121,8 @@ class LMForwardAPI:
                     low_cpu_mem_usage=True,
                     device_map="auto",
                     trust_remote_code=True,
+                    quantization_config=bnb_config,
+                    config=config,
                     **kwargs,
                 )
 
