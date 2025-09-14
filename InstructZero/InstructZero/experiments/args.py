@@ -93,6 +93,12 @@ def parse_args():
         help="When --model_name hf: architecture hint for loading. Options: auto, gpt_neox, llama, mpt"
     )
     parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default=None,
+        help="Optional: path or HF repo id to load tokenizer from (useful when local tokenizer.json is incompatible)"
+    )
+    parser.add_argument(
         "--load_in_8bit",
         action='store_true',
         help="Load local HF model in 8-bit (requires bitsandbytes)"
