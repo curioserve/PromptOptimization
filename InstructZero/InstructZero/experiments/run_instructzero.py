@@ -49,7 +49,7 @@ class LMForwardAPI:
             }
         self.ops_model = model_name
         # import pdb; pdb.set_trace()
-        if self.ops_model in ["vicuna", "wizardlm", 'openchat']:
+        if self.ops_model in ["vicuna", "wizardlm", 'openchat', 'hf']:
             self.model = AutoModelForCausalLM.from_pretrained(
                 HF_cache_dir,
                 low_cpu_mem_usage=True,
@@ -67,7 +67,7 @@ class LMForwardAPI:
             raise NotImplementedError
 
         self.init_token = init_prompt[0] + init_qa[0]
-        if self.ops_model in ['wizardlm', 'vicuna', 'openchat']:
+        if self.ops_model in ['wizardlm', 'vicuna', 'openchat', 'hf']:
             self.embedding = self.model.get_input_embeddings().weight.clone()
             input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.cuda()
             self.init_prompt = self.embedding[input_ids]
@@ -90,13 +90,17 @@ class LMForwardAPI:
         elif self.ops_model == 'alpaca':
             self.system_prompt= "Below is an instruction that describes a task. Write a response that appropriately completes the request."
             self.role = ["### Instruction:", "### Response:"]
+        elif self.ops_model == 'hf':
+            # Generic default chat-style template for arbitrary HF models
+            self.system_prompt = "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions."
+            self.role = ['USER:', 'ASSISTANT:']
         else:
             NotImplementedError
             
 
         if random_proj == 'normal':
             # calculate std for normal distribution
-            if model_name in ['wizardlm', 'vicuna', 'openchat']:
+            if model_name in ['wizardlm', 'vicuna', 'openchat', 'hf']:
                 print('Get the embedding firstly to avoid issues')
             else:
                 raise NotImplementedError
@@ -191,7 +195,7 @@ class LMForwardAPI:
         if instruction[0] in self.prompts_set.keys():
             (dev_perf, instruction_score) = self.prompts_set[instruction[0]]
         else:
-            if self.api_model in ['chatgpt']: 
+            if self.api_model in ['chatgpt', 'local_hf']: 
                 dev_perf, instruction_score = evaluate.evaluate_prompts(instruction, self.eval_template, self.eval_data, self.demos_template, self.few_shot_data, self.conf['evaluation']['method'], self.conf['evaluation'])
                 dev_perf = dev_perf.sorted()[1][0]
                 self.prompts_set[instruction[0]] = (dev_perf, instruction_score)
@@ -226,7 +230,8 @@ class LMForwardAPI:
         return self.prompts_set
     
 def run(args):
-    task, HF_cache_dir=args.task, args.HF_cache_dir
+    task = args.task
+    HF_cache_dir = args.HF_cache_dir
     random_proj, intrinsic_dim, n_prompt_tokens= args.random_proj, args.intrinsic_dim, args.n_prompt_tokens
 
     assert args.task in TASKS, 'Task not found!'
@@ -370,7 +375,39 @@ def run(args):
     print('Evaluating on test data...')
 
     test_conf = get_test_conf(task, test_data)
-    
+    # Configure backend for final test
+    if args.api_model == 'local_hf':
+        test_conf['evaluation']['model'] = {
+            'name': 'LocalHF_Forward',
+            'hf_path': args.bb_hf_path,
+            'batch_size': args.bb_batch_size,
+            'max_new_tokens': args.bb_max_new_tokens,
+            'torch_dtype': args.bb_torch_dtype,
+        }
+    else:
+        test_conf['evaluation']['model'] = {
+            'name': 'GPT_forward',
+            'gpt_config': {
+                'model': 'gpt-3.5-turbo',
+            }
+        }
+    # Configure evaluation backend (black-box LLM) for dev loop
+    if args.api_model == 'local_hf':
+        conf['evaluation']['model'] = {
+            'name': 'LocalHF_Forward',
+            'hf_path': args.bb_hf_path,
+            'batch_size': args.bb_batch_size,
+            'max_new_tokens': args.bb_max_new_tokens,
+            'torch_dtype': args.bb_torch_dtype,
+        }
+    else:
+        conf['evaluation']['model'] = {
+            'name': 'GPT_forward',
+            'gpt_config': {
+                'model': 'gpt-3.5-turbo',
+            },
+            'batch_size': 20,
+        }
     test_res = ape.evaluate_prompts(prompts=prompts,
                                     eval_template=eval_template,
                                     eval_data=test_data,
