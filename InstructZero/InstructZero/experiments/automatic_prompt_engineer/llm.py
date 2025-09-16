@@ -930,12 +930,21 @@ class LocalHF_Forward(LLM):
         cfg = None
         try:
             tmp = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
-            # strip stale quantization_config if not using bnb
-            if bnb_config is None and hasattr(tmp, 'quantization_config'):
+            # If user requested BitsAndBytes quantization but the model ships with a different
+            # quantization config (e.g., MxFP4), disable BitsAndBytes and keep native quant.
+            if hasattr(tmp, 'quantization_config'):
+                qcfg = getattr(tmp, 'quantization_config', None)
+                qmethod = None
                 try:
-                    delattr(tmp, 'quantization_config')
+                    if isinstance(qcfg, dict):
+                        qmethod = (qcfg.get('quant_method') or qcfg.get('quant_type') or qcfg.get('type'))
+                    else:
+                        qmethod = getattr(qcfg, 'quant_method', None) or qcfg.__class__.__name__
                 except Exception:
-                    tmp.quantization_config = None
+                    qmethod = None
+                if bnb_config is not None and qmethod and 'bitsandbytes' not in str(qmethod).lower():
+                    # conflict: drop BitsAndBytes to respect model's native quantization
+                    bnb_config = None
             cfg = tmp
         except Exception:
             cfg = None
