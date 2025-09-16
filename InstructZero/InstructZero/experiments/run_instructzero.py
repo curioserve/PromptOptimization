@@ -213,7 +213,7 @@ class LMForwardAPI:
         ## eval preparation
         self.conf = ape_config.update_config(conf, base_conf)
         # Ensure dev evaluation backend matches requested API model
-        if self.api_model == 'local_hf':
+        if args.api_model == 'local_hf':
             # Configure dev evaluation to use local HF model as black-box
             self.conf['evaluation']['model'] = {
                 'name': 'LocalHF_Forward',
@@ -221,6 +221,10 @@ class LMForwardAPI:
                 'batch_size': getattr(args, 'bb_batch_size', 1),
                 'max_new_tokens': getattr(args, 'bb_max_new_tokens', 128),
                 'torch_dtype': getattr(args, 'bb_torch_dtype', 'float16'),
+                'load_in_8bit': getattr(args, 'load_in_8bit', False),
+                'load_in_4bit': getattr(args, 'load_in_4bit', False),
+                'bnb_compute_dtype': getattr(args, 'bnb_compute_dtype', 'float16'),
+                'bnb_quant_type': getattr(args, 'bnb_quant_type', 'nf4'),
             }
         else:
             # Default to OpenAI GPT forward; requires OPENAI_API_KEY
