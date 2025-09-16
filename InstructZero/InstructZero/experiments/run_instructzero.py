@@ -67,19 +67,34 @@ class LMForwardAPI:
                     bnb_4bit_quant_type=getattr(args, 'bnb_quant_type', 'nf4'),
                 )
 
-            # Load config first to strip unexpected quantization_config if not using bnb
+            # Load config first and reconcile quantization settings with user intent
             config = None
             try:
                 cfg = AutoConfig.from_pretrained(
                     HF_cache_dir,
                     trust_remote_code=True,
                 )
-                if bnb_config is None and hasattr(cfg, 'quantization_config'):
-                    # Remove stale quantization_config to avoid bitsandbytes requirement
+                # If user requested BitsAndBytes quantization but the model ships with a different
+                # quantization config (e.g., MxFP4), strip it to avoid merge conflicts.
+                if bnb_config is not None and hasattr(cfg, 'quantization_config'):
+                    qcfg = getattr(cfg, 'quantization_config', None)
+                    qmethod = None
                     try:
-                        delattr(cfg, 'quantization_config')
+                        if isinstance(qcfg, dict):
+                            qmethod = (qcfg.get('quant_method') or qcfg.get('quant_type') or qcfg.get('type'))
+                        else:
+                            qmethod = getattr(qcfg, 'quant_method', None) or qcfg.__class__.__name__
                     except Exception:
-                        cfg.quantization_config = None
+                        qmethod = None
+                    if qmethod and 'bitsandbytes' not in str(qmethod).lower():
+                        # Remove model's non-BnB quantization so we can use BitsAndBytes
+                        try:
+                            delattr(cfg, 'quantization_config')
+                        except Exception:
+                            try:
+                                cfg.quantization_config = None
+                            except Exception:
+                                pass
                 config = cfg
             except KeyError:
                 # Unknown model_type in config; proceed without explicit config
