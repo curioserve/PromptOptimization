@@ -138,6 +138,16 @@ class LMForwardAPI:
         else:
             raise NotImplementedError
 
+        # Initialize tokenizer before first use
+        tok_src = getattr(args, 'tokenizer_path', None) or HF_cache_dir
+        self.tokenizer = AutoTokenizer.from_pretrained(tok_src, trust_remote_code=True)
+        # Set a safe padding token if missing (fallback to eos)
+        if getattr(self.tokenizer, 'pad_token', None) is None and getattr(self.tokenizer, 'pad_token_id', None) is None:
+            try:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            except Exception:
+                pass
+
         self.init_token = init_prompt[0] + init_qa[0]
         if self.ops_model in ['wizardlm', 'vicuna', 'openchat', 'hf']:
             self.embedding = self.model.get_input_embeddings().weight.clone()
