@@ -67,7 +67,7 @@ class LMForwardAPI:
                 )
 
             # Load config first and reconcile quantization settings with user intent
-            config = None
+            hf_config = None
             try:
                 cfg = AutoConfig.from_pretrained(
                     HF_cache_dir,
@@ -94,10 +94,10 @@ class LMForwardAPI:
                                 cfg.quantization_config = None
                             except Exception:
                                 pass
-                config = cfg
+                hf_config = cfg
             except KeyError:
                 # Unknown model_type in config; proceed without explicit config
-                config = None
+                hf_config = None
 
             if self.ops_model == 'hf' and hasattr(args, 'hf_arch') and args.hf_arch and args.hf_arch != 'auto':
                 arch = args.hf_arch.lower()
@@ -110,8 +110,8 @@ class LMForwardAPI:
                         quantization_config=bnb_config,
                         **kwargs,
                     )
-                    if config is not None:
-                        extra["config"] = config
+                    if hf_config is not None:
+                        extra["config"] = hf_config
                     self.model = GPTNeoXForCausalLM.from_pretrained(HF_cache_dir, **extra)
                 elif arch == 'llama':
                     from transformers import LlamaForCausalLM
@@ -146,8 +146,8 @@ class LMForwardAPI:
                     quantization_config=bnb_config,
                     **kwargs,
                 )
-                if config is not None:
-                    extra["config"] = config
+                if hf_config is not None:
+                    extra["config"] = hf_config
                 self.model = AutoModelForCausalLM.from_pretrained(HF_cache_dir, **extra)
         else:
             raise NotImplementedError
