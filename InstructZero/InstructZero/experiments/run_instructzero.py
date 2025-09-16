@@ -289,7 +289,8 @@ class LMForwardAPI:
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
         input_embed = torch.cat((prompt_embedding, input_embed), 1)
 
-        outputs = self.model.generate(inputs_embeds=input_embed, max_new_tokens=128)
+        attn_mask = torch.ones((input_embed.shape[0], input_embed.shape[1]), dtype=torch.long, device=input_embed.device)
+        outputs = self.model.generate(inputs_embeds=input_embed, attention_mask=attn_mask, max_new_tokens=128)
         instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
         # postprocess instruction
         # instruction[0] = 'The instruction was to ' + instruction[0]

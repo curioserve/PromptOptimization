@@ -970,3 +970,9 @@ class LocalHF_Forward(LLM):
             outs = self.tokenizer.batch_decode(gen, skip_special_tokens=True)
             texts.extend(outs)
         return texts
+
+    def log_probs(self, text, log_prob_range=None):
+        """Not implemented for LocalHF_Forward. Provided to satisfy abstract base class.
+        This evaluation path does not use log_probs, so we raise a clear error if called.
+        """
+        raise NotImplementedError("log_probs is not implemented for LocalHF_Forward")
