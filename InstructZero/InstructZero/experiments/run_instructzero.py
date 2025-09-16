@@ -49,9 +49,8 @@ class LMForwardAPI:
         p = torch.ones(10)
         
         kwargs={
-            'torch_dtype': torch.float16,
-            'use_cache': True
-            }
+            'dtype': torch.float16,
+        }
         self.ops_model = model_name
         # import pdb; pdb.set_trace()
         if self.ops_model in ["vicuna", "wizardlm", 'openchat', 'hf']:
