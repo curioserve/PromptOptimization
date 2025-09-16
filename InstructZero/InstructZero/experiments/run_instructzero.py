@@ -10,7 +10,7 @@ try:
 except Exception:
     BitsAndBytesConfig = None
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from automatic_prompt_engineer import evaluate, config, template, data
+from automatic_prompt_engineer import evaluate, config as ape_config, template, data
 import os
 import re
 from misc import get_test_conf, get_conf
@@ -122,8 +122,8 @@ class LMForwardAPI:
                         quantization_config=bnb_config,
                         **kwargs,
                     )
-                    if config is not None:
-                        extra["config"] = config
+                    if hf_config is not None:
+                        extra["config"] = hf_config
                     self.model = LlamaForCausalLM.from_pretrained(HF_cache_dir, **extra)
                 else:
                     # Fallback to auto with trust_remote_code
@@ -134,8 +134,8 @@ class LMForwardAPI:
                         quantization_config=bnb_config,
                         **kwargs,
                     )
-                    if config is not None:
-                        extra["config"] = config
+                    if hf_config is not None:
+                        extra["config"] = hf_config
                     self.model = AutoModelForCausalLM.from_pretrained(HF_cache_dir, **extra)
             else:
                 # Auto path with trust_remote_code to handle custom model_type values
@@ -211,7 +211,26 @@ class LMForwardAPI:
             torch.nn.init.uniform_(self.linear.weight, -1, 1)
 
         ## eval preparation
-        self.conf = config.update_config(conf, base_conf)
+        self.conf = ape_config.update_config(conf, base_conf)
+        # Ensure dev evaluation backend matches requested API model
+        if self.api_model == 'local_hf':
+            # Configure dev evaluation to use local HF model as black-box
+            self.conf['evaluation']['model'] = {
+                'name': 'LocalHF_Forward',
+                'hf_path': getattr(args, 'bb_hf_path', HF_cache_dir),
+                'batch_size': getattr(args, 'bb_batch_size', 1),
+                'max_new_tokens': getattr(args, 'bb_max_new_tokens', 128),
+                'torch_dtype': getattr(args, 'bb_torch_dtype', 'float16'),
+            }
+        else:
+            # Default to OpenAI GPT forward; requires OPENAI_API_KEY
+            self.conf['evaluation']['model'] = {
+                'name': 'GPT_forward',
+                'gpt_config': {
+                    'model': 'gpt-3.5-turbo',
+                },
+                'batch_size': 20,
+            }
         self.eval_data = eval_data
         self.eval_template = template.EvalTemplate("Instruction: [PROMPT]\n\nInput: [INPUT]\n Output: [OUTPUT]")
         self.demos_template = template.DemosTemplate("Input: [INPUT]\nOutput: [OUTPUT]")
