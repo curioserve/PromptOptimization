@@ -930,21 +930,55 @@ class LocalHF_Forward(LLM):
         cfg = None
         try:
             tmp = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
-            # If user requested BitsAndBytes quantization but the model ships with a different
-            # quantization config (e.g., MxFP4), disable BitsAndBytes and keep native quant.
-            if hasattr(tmp, 'quantization_config'):
-                qcfg = getattr(tmp, 'quantization_config', None)
+            # Determine GPU compute capability (e.g., 80 for A100, 89 for Ada)
+            cc = None
+            try:
+                if torch.cuda.is_available():
+                    maj, minr = torch.cuda.get_device_capability(0)
+                    cc = maj * 10 + minr
+            except Exception:
+                cc = None
+
+            # Inspect model's native quantization, if any
+            qcfg = getattr(tmp, 'quantization_config', None)
+            qmethod = None
+            try:
+                if isinstance(qcfg, dict):
+                    qmethod = (qcfg.get('quant_method') or qcfg.get('quant_type') or qcfg.get('type'))
+                elif qcfg is not None:
+                    qmethod = getattr(qcfg, 'quant_method', None) or qcfg.__class__.__name__
+            except Exception:
                 qmethod = None
-                try:
-                    if isinstance(qcfg, dict):
-                        qmethod = (qcfg.get('quant_method') or qcfg.get('quant_type') or qcfg.get('type'))
-                    else:
-                        qmethod = getattr(qcfg, 'quant_method', None) or qcfg.__class__.__name__
-                except Exception:
-                    qmethod = None
-                if bnb_config is not None and qmethod and 'bitsandbytes' not in str(qmethod).lower():
-                    # conflict: drop BitsAndBytes to respect model's native quantization
-                    bnb_config = None
+
+            # If the model ships with a non-BnB quantization (e.g., MxFP4) but the GPU is < sm_89,
+            # force a safe fallback: remove native quant and use BitsAndBytes 4-bit NF4.
+            if qmethod and 'bitsandbytes' not in str(qmethod).lower():
+                if cc is not None and cc < 89:
+                    # Ensure we have a BnB config; default to 4-bit NF4 if not provided
+                    if bnb_config is None:
+                        try:
+                            compute_dtype = torch.float16 if config.get('bnb_compute_dtype', 'float16') == 'float16' else torch.bfloat16
+                        except Exception:
+                            compute_dtype = torch.float16
+                        bnb_config = BitsAndBytesConfig(
+                            load_in_8bit=bool(config.get('load_in_8bit', False)),
+                            load_in_4bit=True,
+                            bnb_4bit_compute_dtype=compute_dtype,
+                            bnb_4bit_quant_type=config.get('bnb_quant_type', 'nf4'),
+                        )
+                    # Remove native quantization config to avoid merge conflicts
+                    try:
+                        delattr(tmp, 'quantization_config')
+                    except Exception:
+                        try:
+                            tmp.quantization_config = None
+                        except Exception:
+                            pass
+                else:
+                    # On newer GPUs (>= sm_89), prefer native quantization: drop BnB if conflicting
+                    if bnb_config is not None:
+                        bnb_config = None
+
             cfg = tmp
         except Exception:
             cfg = None
