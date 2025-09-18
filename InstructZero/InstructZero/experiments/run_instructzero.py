@@ -99,6 +99,19 @@ class LMForwardAPI:
                 # Unknown model_type in config; proceed without explicit config
                 hf_config = None
 
+            # Build a max_memory map to encourage sharding across all visible GPUs
+            max_memory = None
+            try:
+                if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+                    max_memory = {}
+                    for i in range(torch.cuda.device_count()):
+                        total_gb = torch.cuda.get_device_properties(i).total_memory // (1024**3)
+                        headroom = 2  # leave ~2 GiB headroom per GPU
+                        alloc_gb = max(1, int(total_gb) - headroom)
+                        max_memory[i] = f"{alloc_gb}GiB"
+            except Exception:
+                max_memory = None
+
             if self.ops_model == 'hf' and hasattr(args, 'hf_arch') and args.hf_arch and args.hf_arch != 'auto':
                 arch = args.hf_arch.lower()
                 if arch == 'gpt_neox':
@@ -110,6 +123,8 @@ class LMForwardAPI:
                         quantization_config=bnb_config,
                         **kwargs,
                     )
+                    if max_memory is not None:
+                        extra["max_memory"] = max_memory
                     if hf_config is not None:
                         extra["config"] = hf_config
                     self.model = GPTNeoXForCausalLM.from_pretrained(HF_cache_dir, **extra)
@@ -122,6 +137,8 @@ class LMForwardAPI:
                         quantization_config=bnb_config,
                         **kwargs,
                     )
+                    if max_memory is not None:
+                        extra["max_memory"] = max_memory
                     if hf_config is not None:
                         extra["config"] = hf_config
                     self.model = LlamaForCausalLM.from_pretrained(HF_cache_dir, **extra)
@@ -134,6 +151,8 @@ class LMForwardAPI:
                         quantization_config=bnb_config,
                         **kwargs,
                     )
+                    if max_memory is not None:
+                        extra["max_memory"] = max_memory
                     if hf_config is not None:
                         extra["config"] = hf_config
                     self.model = AutoModelForCausalLM.from_pretrained(HF_cache_dir, **extra)
@@ -146,6 +165,8 @@ class LMForwardAPI:
                     quantization_config=bnb_config,
                     **kwargs,
                 )
+                if max_memory is not None:
+                    extra["max_memory"] = max_memory
                 if hf_config is not None:
                     extra["config"] = hf_config
                 self.model = AutoModelForCausalLM.from_pretrained(HF_cache_dir, **extra)
@@ -170,6 +191,7 @@ class LMForwardAPI:
             target_device = self.embedding.device
             input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.to(target_device)
             self.init_prompt = self.embedding[input_ids]
+            # We'll move projection layer after it is initialized
             
         ################# setup n_prompts_token #################
         self.n_prompt_tokens = n_prompt_tokens
@@ -180,6 +202,11 @@ class LMForwardAPI:
         # Create the template for Vicuna and WizardLM
         self.count = 0
         self.linear = torch.nn.Linear(intrinsic_dim, self.n_prompt_tokens * self.hidden_size, bias=False)
+        # Ensure projection layer lives on the same device as embeddings
+        try:
+            self.linear = self.linear.to(self.embedding.device)
+        except Exception:
+            pass
         if self.ops_model == 'vicuna':
             self.system_prompt = "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions."
             self.role = ['USER:', 'ASSISTANT:']
@@ -268,17 +295,20 @@ class LMForwardAPI:
             pe_list = []
             for pe in prompt_embedding:
                 z = torch.tensor(pe).type(torch.float32)  # z
+                z = z.to(self.embedding.device)
                 z = self.linear(z)  # Az
             prompt_embedding = torch.cat(pe_list)  # num_workers*bsz x prompt_len x dim
     
         elif isinstance(prompt_embedding, np.ndarray):  # single query or None
             prompt_embedding = torch.tensor(prompt_embedding).type(torch.float32)  # z
+            prompt_embedding = prompt_embedding.to(self.embedding.device)
             prompt_embedding = self.linear(prompt_embedding)  # Az
             # if self.init_prompt is not None:
             #     prompt_embedding = prompt_embedding + self.init_prompt  # Az + p_0
             prompt_embedding = prompt_embedding.reshape(1, self.n_prompt_tokens, -1)
         elif isinstance(prompt_embedding, torch.Tensor): 
             prompt_embedding = prompt_embedding.type(torch.float32)
+            prompt_embedding = prompt_embedding.to(self.embedding.device)
             prompt_embedding = self.linear(prompt_embedding)  # Az
             prompt_embedding = prompt_embedding.reshape(1, self.n_prompt_tokens, -1)
         else:
@@ -294,8 +324,16 @@ class LMForwardAPI:
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
         input_embed = torch.cat((prompt_embedding, input_embed), 1)
 
-        attn_mask = torch.ones((input_embed.shape[0], input_embed.shape[1]), dtype=torch.long, device=input_embed.device)
-        outputs = self.model.generate(inputs_embeds=input_embed, attention_mask=attn_mask, max_new_tokens=128)
+        # Use boolean attention mask to save memory vs int64
+        attn_mask = torch.ones((input_embed.shape[0], input_embed.shape[1]), dtype=torch.bool, device=input_embed.device)
+        # Disable KV cache to reduce memory usage during generation
+        with torch.inference_mode():
+            outputs = self.model.generate(
+                inputs_embeds=input_embed,
+                attention_mask=attn_mask,
+                max_new_tokens=128,
+                use_cache=False,
+            )
         instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
         # postprocess instruction
         # instruction[0] = 'The instruction was to ' + instruction[0]
