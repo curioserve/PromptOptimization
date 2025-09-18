@@ -48,9 +48,8 @@ class LMForwardAPI:
                  HF_cache_dir=None, args=None):
         p = torch.ones(10)
         
-        kwargs={
-            'dtype': torch.float16,
-        }
+        # Defer dtype selection until after we load the HF config
+        kwargs={}
         self.ops_model = model_name
         # import pdb; pdb.set_trace()
         if self.ops_model in ["vicuna", "wizardlm", 'openchat', 'hf']:
@@ -99,6 +98,20 @@ class LMForwardAPI:
                 # Unknown model_type in config; proceed without explicit config
                 hf_config = None
 
+            # Prefer dtype from config (bfloat16 for this model) unless unavailable
+            preferred_dtype = torch.float16
+            try:
+                if hf_config is not None:
+                    # transformers configs often expose torch_dtype directly
+                    cfg_dtype = getattr(hf_config, 'torch_dtype', None)
+                    if cfg_dtype is None:
+                        # Some configs store as string under `dtype`
+                        cfg_dtype = torch.bfloat16 if str(getattr(hf_config, 'dtype', '')).lower().find('bfloat16') >= 0 else None
+                    if cfg_dtype is not None:
+                        preferred_dtype = cfg_dtype
+            except Exception:
+                pass
+
             # Build a max_memory map to encourage sharding across all visible GPUs
             max_memory = None
             try:
@@ -106,6 +119,10 @@ class LMForwardAPI:
                     max_memory = {}
                     for i in range(torch.cuda.device_count()):
                         total_gb = torch.cuda.get_device_properties(i).total_memory // (1024**3)
+                        # Strongly cap GPU 0 to avoid loading large shards there if it's busy
+                        if i == 0:
+                            max_memory[i] = "1GiB"
+                            continue
                         headroom = 2  # leave ~2 GiB headroom per GPU
                         alloc_gb = max(1, int(total_gb) - headroom)
                         max_memory[i] = f"{alloc_gb}GiB"
@@ -121,6 +138,7 @@ class LMForwardAPI:
                         device_map="auto",
                         trust_remote_code=True,
                         quantization_config=bnb_config,
+                        torch_dtype=preferred_dtype,
                         **kwargs,
                     )
                     if max_memory is not None:
@@ -163,6 +181,7 @@ class LMForwardAPI:
                     device_map="auto",
                     trust_remote_code=True,
                     quantization_config=bnb_config,
+                    torch_dtype=preferred_dtype,
                     **kwargs,
                 )
                 if max_memory is not None:
