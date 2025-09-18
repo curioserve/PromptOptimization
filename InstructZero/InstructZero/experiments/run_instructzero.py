@@ -164,8 +164,11 @@ class LMForwardAPI:
 
         self.init_token = init_prompt[0] + init_qa[0]
         if self.ops_model in ['wizardlm', 'vicuna', 'openchat', 'hf']:
-            self.embedding = self.model.get_input_embeddings().weight.clone()
-            input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.cuda()
+            # Keep the original embedding weight without cloning to preserve device placement
+            self.embedding = self.model.get_input_embeddings().weight
+            # Move input ids to the same device as the embeddings (works with device_map="auto")
+            target_device = self.embedding.device
+            input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.to(target_device)
             self.init_prompt = self.embedding[input_ids]
             
         ################# setup n_prompts_token #################
@@ -284,7 +287,9 @@ class LMForwardAPI:
             )
         # create the input text with the system prompt  
         input_text = f"{self.system_prompt} USER:{self.init_token} ASSISTANT:"
-        input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
+        # Ensure input IDs are placed on the same device as embeddings
+        target_device = self.embedding.device
+        input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.to(target_device)
         input_embed = self.embedding[input_ids]
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
         input_embed = torch.cat((prompt_embedding, input_embed), 1)
