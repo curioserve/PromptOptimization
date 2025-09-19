@@ -346,13 +346,28 @@ class LMForwardAPI:
         # Use boolean attention mask to save memory vs int64
         attn_mask = torch.ones((input_embed.shape[0], input_embed.shape[1]), dtype=torch.bool, device=input_embed.device)
         # Disable KV cache to reduce memory usage during generation
+        # Add basic watchdog timing and determinism (no sampling)
+        start_gen = time.time()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device=input_embed.device)
+        except Exception:
+            pass
         with torch.inference_mode():
             outputs = self.model.generate(
                 inputs_embeds=input_embed,
                 attention_mask=attn_mask,
                 max_new_tokens=128,
                 use_cache=False,
+                do_sample=False,
+                max_time=120.0,
             )
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device=input_embed.device)
+        except Exception:
+            pass
+        print(f"Generation finished in {time.time()-start_gen:.2f}s")
         instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
         # postprocess instruction
         # instruction[0] = 'The instruction was to ' + instruction[0]
