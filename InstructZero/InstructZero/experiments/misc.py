@@ -5,13 +5,13 @@ from evaluation.instruction_induction.exec_accuracy import exec_accuracy_evaluat
 import os
 
 TASKS=[
-    'antonyms', 'cause_and_effect', 'common_concept', 'diff', 'first_word_letter',
-    'informal_to_formal', 'larger_animal', 'letters_list', 'taxonomy_animal', 'negation', 
-    'num_to_verbal', 'active_to_passive', 'singular_to_plural', 'rhymes',
-    'second_word_letter', 'sentence_similarity', 'sentiment', 'orthography_starts_with',
-    'sum', 'synonyms', 'translation_en-de', 'translation_en-es',
-    'translation_en-fr', 'word_in_context', 'auto_categorization', 'auto_debugging', 'ascii', 'cs_algorithms',
-    'periodic_elements', 'word_sorting', 'word_unscrambling', 'odd_one_out', 'object_count'
+    'active_to_passive', 'antonyms', 'ascii_word_recognition', 'auto_categorization', 'auto_debugging',
+    'cause_and_effect', 'common_concept', 'cs_algorithms', 'diff', 'first_word_letter',
+    'informal_to_formal', 'larger_animal', 'letters_list', 'math500_highconf', 'negation', 
+    'num_to_verbal', 'object_counting', 'odd_one_out', 'orthography_starts_with',
+    'periodic_elements', 'rhymes', 'second_word_letter', 'sentence_similarity', 'sentiment',
+    'singular_to_plural', 'sum', 'synonyms', 'taxonomy_animal', 'translation_en-de', 
+    'translation_en-es', 'translation_en-fr', 'word_in_context', 'word_sorting', 'word_unscrambling'
 ]
 
 
