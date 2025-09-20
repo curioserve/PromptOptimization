@@ -296,6 +296,16 @@ class GPT_Forward(LLM):
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
             openai.api_key = api_key
+        # Fallback to OPENROUTER_API_KEY if OPENAI_API_KEY is not set
+        if not getattr(openai, 'api_key', None):
+            or_key = os.getenv("OPENROUTER_API_KEY")
+            if or_key:
+                openai.api_key = or_key
+        # Debug: print masked key info and base
+        masked = None
+        if getattr(openai, 'api_key', None):
+            masked = openai.api_key[:6] + "..." + openai.api_key[-4:]
+        print(f"[GPT_Forward.__init__] api_base={getattr(openai, 'api_base', None)} | api_key_set={bool(getattr(openai, 'api_key', None))} | key_preview={masked}", flush=True)
 
     def confirm_cost(self, texts, n, max_tokens):
         total_estimated_cost = 0
