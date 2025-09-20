@@ -34,7 +34,7 @@ class LMForwardAPI:
         p = torch.ones(10)
         
         kwargs={
-            'torch_dtype': torch.float16,
+            'torch_dtype': torch.bfloat16,
             'use_cache': True
             }
         self.ops_model = model_name
@@ -63,6 +63,7 @@ class LMForwardAPI:
                 low_cpu_mem_usage=True,
                 device_map="auto",
                 max_memory=max_memory,
+                _fast_init=False,
                 **kwargs,
             )
             print(f"[LMForwardAPI.__init__] Model loaded in {time.time()-_t0:.2f}s", flush=True)
@@ -207,7 +208,7 @@ class LMForwardAPI:
         outputs = self.model.generate(
             inputs_embeds=input_embed,
             attention_mask=attn_mask,
-            max_new_tokens=128,
+            max_new_tokens=64,
             min_new_tokens=16,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
