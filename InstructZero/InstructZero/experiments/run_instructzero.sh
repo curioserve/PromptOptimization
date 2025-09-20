@@ -1,4 +1,6 @@
 export CUDA_VISIBLE_DEVICES=0
+# Unbuffered python output for real-time logs
+export PYTHONUNBUFFERED=1
 SFT=5
 RANDOM_PROJ='uniform'
 INTRINSIC_DIM=10
@@ -17,6 +19,8 @@ export OPENAI_API_BASE=${OPENAI_API_BASE:-https://openrouter.ai/api/v1}
 if [ -z "$OPENAI_API_KEY" ] && [ -n "$OPENROUTER_API_KEY" ]; then export OPENAI_API_KEY="$OPENROUTER_API_KEY"; fi
 export EVAL_API_MODEL=${EVAL_API_MODEL:-openai/gpt-oss-20b}
 export EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-10}
+# Timeout for OpenAI/OpenRouter requests (seconds)
+export OPENAI_TIMEOUT=${OPENAI_TIMEOUT:-60}
 
 datasets=(informal_to_formal odd_one_out second_word_letter synonyms word_sorting letters_list)
 

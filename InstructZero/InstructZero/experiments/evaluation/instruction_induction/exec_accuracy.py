@@ -23,6 +23,8 @@ def get_query_for_test(prompt, eval_template, input_, output_):
 
 
 def exec_accuracy_evaluator(prompts, eval_template, eval_data, demos_template, few_shot_data, config):
+    print('[exec_accuracy_evaluator] Enter', flush=True)
+    print(f"[exec_accuracy_evaluator] num_prompts={len(prompts)} | num_candidates_per_prompt={config['num_samples']}", flush=True)
     queries = []
     answers = []
     for prompt in prompts:
@@ -37,10 +39,15 @@ def exec_accuracy_evaluator(prompts, eval_template, eval_data, demos_template, f
                 prompt, eval_template, input_, output_, demo_data, demos_template)
             queries.append(query)
             answers.append(output_)
-
+    print(f"[exec_accuracy_evaluator] Built {len(queries)} queries; instantiating LLM model...", flush=True)
     # Instantiate the LLM
+    _t0 = __import__('time').time()
     model = llm.model_from_config(config['model'])
+    print(f"[exec_accuracy_evaluator] LLM model instantiated in {__import__('time').time()-_t0:.2f}s", flush=True)
+    print(f"[exec_accuracy_evaluator] Calling model.generate_text on {len(queries)} queries...", flush=True)
+    _t1 = __import__('time').time()
     model_outputs = model.generate_text(queries, 1)
+    print(f"[exec_accuracy_evaluator] model.generate_text returned {len(model_outputs)} outputs in {__import__('time').time()-_t1:.2f}s", flush=True)
 
     task = config['task']
     metric = utility.TASK_TO_METRIC.get(task, utility.default_metric)
@@ -63,6 +70,7 @@ def exec_accuracy_evaluator(prompts, eval_template, eval_data, demos_template, f
 
     # Reshape the scores so that it is num_prompts x num_samples
     scores = np.array(scores).reshape(len(prompts), config['num_samples'])
+    print(f"[exec_accuracy_evaluator] scores shape={scores.shape}", flush=True)
 
     res = ExecAccuracyEvaluationResult(prompts, scores)
     return res, scores

@@ -38,26 +38,33 @@ class LMForwardAPI:
             'use_cache': True
             }
         self.ops_model = model_name
+        print(f"[LMForwardAPI.__init__] model_name={model_name}, HF_cache_dir={HF_cache_dir}", flush=True)
         # import pdb; pdb.set_trace()
         if self.ops_model in ["vicuna", "wizardlm", 'openchat', 'gpt-oss-20b']:
+            print("[LMForwardAPI.__init__] Loading model.from_pretrained...", flush=True)
+            _t0 = time.time()
             self.model = AutoModelForCausalLM.from_pretrained(
                 HF_cache_dir,
                 low_cpu_mem_usage=True,
                 device_map="auto",
                 **kwargs,
             )
+            print(f"[LMForwardAPI.__init__] Model loaded in {time.time()-_t0:.2f}s", flush=True)
 
+            print("[LMForwardAPI.__init__] Loading tokenizer.from_pretrained...", flush=True)
             self.tokenizer = AutoTokenizer.from_pretrained(
                                 HF_cache_dir,
                                 model_max_length=1024,
                                 padding_side="left",
                                 use_fast=False,
                             )
+            print("[LMForwardAPI.__init__] Tokenizer loaded", flush=True)
         else:
             raise NotImplementedError
 
         self.init_token = init_prompt[0] + init_qa[0]
         if self.ops_model in ['wizardlm', 'vicuna', 'openchat', 'gpt-oss-20b']:
+            print("[LMForwardAPI.__init__] Building input embeddings for init prompt...", flush=True)
             self.embedding = self.model.get_input_embeddings().weight.clone()
             input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.cuda()
             self.init_prompt = self.embedding[input_ids]
@@ -65,7 +72,7 @@ class LMForwardAPI:
         ################# setup n_prompts_token #################
         self.n_prompt_tokens = n_prompt_tokens
         self.hidden_size = self.init_prompt.shape[-1]
-        print('Shape of initial prompt embedding: {}'.format(self.init_prompt.shape))
+        print('Shape of initial prompt embedding: {}'.format(self.init_prompt.shape), flush=True)
         
         # self.init_prompt = self.init_prompt.reshape(self.n_prompt_tokens * self.hidden_size)
         # Create the template for Vicuna and WizardLM
@@ -83,8 +90,8 @@ class LMForwardAPI:
 
         if random_proj == 'normal':
             # calculate std for normal distribution
-            if model_name in ['wizardlm', 'vicuna', 'openchat']:
-                print('Get the embedding firstly to avoid issues')
+            if model_name in ['wizardlm', 'vicuna', 'openchat', 'gpt-oss-20b']:
+                print('Get the embedding firstly to avoid issues', flush=True)
             else:
                 raise NotImplementedError
             mu_hat = self.embedding.reshape(-1).mean().item()
@@ -92,12 +99,13 @@ class LMForwardAPI:
             mu = 0.0
             std = args.alpha * std_hat / (np.sqrt(intrinsic_dim) * args.sigma)
 
-            print('[Embedding] mu: {} | std: {} [RandProj]  mu: {} | std: {}'.format(mu_hat, std_hat, mu, std))
+            print('[Embedding] mu: {} | std: {} [RandProj]  mu: {} | std: {}'.format(mu_hat, std_hat, mu, std), flush=True)
             torch.nn.init.normal_(self.linear.weight, -1, 1)
         elif random_proj == 'uniform':  
             torch.nn.init.uniform_(self.linear.weight, -1, 1)
 
         ## eval preparation
+        print('[LMForwardAPI.__init__] Updating config...', flush=True)
         self.conf = config.update_config(conf, base_conf)
         self.eval_data = eval_data
         self.eval_template = template.EvalTemplate("Instruction: [PROMPT]\n\nInput: [INPUT]\n Output: [OUTPUT]")
@@ -108,9 +116,11 @@ class LMForwardAPI:
         #     self.api_model = exec_evaluator(args.api_model, self.conf)
         # else:
         self.api_model = args.api_model
+        print(f"[LMForwardAPI.__init__] api_model={self.api_model}", flush=True)
 
         if few_shot_data is None:
             self.few_shot_data = prompt_gen_data
+        print(f"[LMForwardAPI.__init__] few_shot_data size={len(self.few_shot_data[0]) if self.few_shot_data is not None else 0}", flush=True)
         
         self.best_train_perf = 0.0
         self.best_dev_perf = 0.0
@@ -119,19 +129,22 @@ class LMForwardAPI:
         self.num_call = 0
         self.best_instruction = None
         self.prompts_set = dict()
+        print('[LMForwardAPI.__init__] Initialization complete.', flush=True)
 
     def eval(self, prompt_embedding=None, test_data=None):
+        print('[LMForwardAPI.eval] Enter', flush=True)
         self.num_call += 1
         if prompt_embedding is None:
             prompt_embedding = self.best_prompt
         tmp_prompt = copy.deepcopy(prompt_embedding)  # list or numpy.ndarray
+        print(f"[LMForwardAPI.eval] prompt_embedding type={type(prompt_embedding)}", flush=True)
         if isinstance(prompt_embedding, list):  # multiple queries
             pe_list = []
             for pe in prompt_embedding:
                 z = torch.tensor(pe).type(torch.float32)  # z
                 z = self.linear(z)  # Az
             prompt_embedding = torch.cat(pe_list)  # num_workers*bsz x prompt_len x dim
-    
+        
         elif isinstance(prompt_embedding, np.ndarray):  # single query or None
             prompt_embedding = torch.tensor(prompt_embedding).type(torch.float32)  # z
             prompt_embedding = self.linear(prompt_embedding)  # Az
@@ -148,13 +161,18 @@ class LMForwardAPI:
             )
         # create the input text with the system prompt  
         input_text = f"{self.system_prompt} USER:{self.init_token} ASSISTANT:"
+        print('[LMForwardAPI.eval] Tokenizing input_text...', flush=True)
         input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
         input_embed = self.embedding[input_ids]
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
         input_embed = torch.cat((prompt_embedding, input_embed), 1)
 
+        print('[LMForwardAPI.eval] Calling model.generate...', flush=True)
+        _tgen = time.time()
         outputs = self.model.generate(inputs_embeds=input_embed, max_new_tokens=128)
+        print(f"[LMForwardAPI.eval] model.generate done in {time.time()-_tgen:.2f}s", flush=True)
         instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        print(f"[LMForwardAPI.eval] Decoded instruction length={len(instruction[0]) if instruction else 0}", flush=True)
         # postprocess instruction
         # instruction[0] = 'The instruction was to ' + instruction[0]
         # import pdb; pdb.set_trace()
@@ -173,13 +191,16 @@ class LMForwardAPI:
         #         break
 
         # print post-processed instruction
-        print('Instruction: {}'.format(instruction))
+        print('Instruction: {}'.format(instruction), flush=True)
         
         if instruction[0] in self.prompts_set.keys():
             (dev_perf, instruction_score) = self.prompts_set[instruction[0]]
         else:
-            if self.api_model in ['chatgpt']: 
+            print(f"[LMForwardAPI.eval] Evaluating prompts via api_model={self.api_model}", flush=True)
+            if self.api_model in ['chatgpt']:
+                _tev = time.time()
                 dev_perf, instruction_score = evaluate.evaluate_prompts(instruction, self.eval_template, self.eval_data, self.demos_template, self.few_shot_data, self.conf['evaluation']['method'], self.conf['evaluation'])
+                print(f"[LMForwardAPI.eval] evaluate_prompts done in {time.time()-_tev:.2f}s", flush=True)
                 dev_perf = dev_perf.sorted()[1][0]
                 self.prompts_set[instruction[0]] = (dev_perf, instruction_score)
             # We will fix the bugs for other api models. Stay tuned!
@@ -202,7 +223,7 @@ class LMForwardAPI:
             round(float(dev_perf), 4),
             round(float(dev_perf), 4),
             round(float(self.best_dev_perf), 4)))
-        print('********* Done *********')
+        print('********* Done *********', flush=True)
 
         return dev_perf, instruction_score
 
@@ -213,19 +234,24 @@ class LMForwardAPI:
         return self.prompts_set
     
 def run(args):
+    print('[run] Starting run(args)', flush=True)
     task, HF_cache_dir = args.task, args.HF_cache_dir
     random_proj, intrinsic_dim, n_prompt_tokens= args.random_proj, args.intrinsic_dim, args.n_prompt_tokens
+    print(f"[run] task={task} | HF_cache_dir={HF_cache_dir} | random_proj={random_proj} | intrinsic_dim={intrinsic_dim} | n_prompt_tokens={n_prompt_tokens}", flush=True)
 
     assert args.task in TASKS, 'Task not found!'
 
+    print('[run] Loading data...', flush=True)
     induce_data, test_data = load_data('induce', task), load_data('eval', task)
 
     # Get size of the induce data
     induce_data_size = len(induce_data[0])
     prompt_gen_size = min(int(induce_data_size), 100)
+    print(f"[run] induce_data_size={induce_data_size} | prompt_gen_size={prompt_gen_size}", flush=True)
     # Induce data is split into prompt_gen_data and eval_data
     prompt_gen_data, eval_data = data.create_split(
         induce_data, prompt_gen_size)
+    print(f"[run] prompt_gen_data sizes: inputs={len(prompt_gen_data[0])}, outputs={len(prompt_gen_data[1])}", flush=True)
 
     # Data is in the form input: single item, output: list of items
     # For prompt_gen_data, sample a single item from the output list
@@ -241,6 +267,7 @@ def run(args):
 
     base_conf = '../configs/instruction_induction.yaml'
     conf = get_conf(task, eval_data)
+    print('[run] Config prepared for evaluation', flush=True)
 
     # make the demo automatically
     subsampled_data = data.subsample_data(prompt_gen_data, conf['generation']['num_demos'])
@@ -249,12 +276,16 @@ def run(args):
     demos = d_template.fill(subsampled_data)
     init_qa = [prompt_gen_template.fill(demos)]
     
+    print('[run] Initializing LMForwardAPI...', flush=True)
     model_forward_api = LMForwardAPI(model_name=args.model_name, eval_data=eval_data, init_prompt=init_prompt, 
                                     init_qa=init_qa, conf=conf, base_conf=base_conf, prompt_gen_data=prompt_gen_data, random_proj=random_proj, 
                                     intrinsic_dim=intrinsic_dim, n_prompt_tokens=n_prompt_tokens, HF_cache_dir=HF_cache_dir, args=args)
+    print('[run] LMForwardAPI initialized', flush=True)
         
     # start bayesian opt
+    print('[run] Drawing initial Sobol points...', flush=True)
     X = SobolEngine(dimension=intrinsic_dim, scramble=True, seed=0).draw(N_INIT)
+    print('[run] Evaluating initial points...', flush=True)
     X_return = [model_forward_api.eval(x) for x in X]
     Y = [X[0] for X in X_return]
     Y_scores = [X[1].squeeze() for X in X_return]
@@ -262,7 +293,7 @@ def run(args):
     X = X.to(**tkwargs)
     Y = torch.FloatTensor(Y).unsqueeze(-1).to(**tkwargs)
     Y_scores = torch.FloatTensor(np.array(Y_scores)).to(**tkwargs)
-    print(f"Best initial point: {Y.max().item():.3f}")
+    print(f"Best initial point: {Y.max().item():.3f}", flush=True)
 
     # standardization Y (no standardization for X)
     X_train = X
@@ -285,15 +316,17 @@ def run(args):
     gp_mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
     
     for i in range(N_ITERATIONS):
-        print(f"X_train shape {X_train.shape}")
-        print(f"y_train shape {y_train.shape}")
+        print(f"[run][iter {i}] X_train shape {X_train.shape}", flush=True)
+        print(f"[run][iter {i}] y_train shape {y_train.shape}", flush=True)
 
         start_time = time.time()
 
+        print(f"[run][iter {i}] Fitting GP MLL...", flush=True)
         fit_gpytorch_mll(gp_mll)#, options = {'maxiter':10})
-        print(f"Fitting done in {time.time()-start_time}")
+        print(f"[run][iter {i}] Fitting done in {time.time()-start_time}", flush=True)
         start_time = time.time()
         EI = ExpectedImprovement(gp_model, best_f = y_train.max().item())
+        print(f"[run][iter {i}] EI prepared", flush=True)
         
         starting_idxs = torch.argsort(-1*y_train.squeeze())[:BATCH_SIZE]
         starting_points = X_train[starting_idxs]
@@ -308,12 +341,13 @@ def run(args):
             best_points.append(newp)
             best_vals.append(newv)
             
-        print(f"best point {best_points[np.argmax(best_vals)]} \n with EI value {np.max(best_vals)}")
-        print(f"Time for CMA-ES {time.time() - start_time}")
+        print(f"[run][iter {i}] best point {best_points[np.argmax(best_vals)]} \n with EI value {np.max(best_vals)}", flush=True)
+        print(f"[run][iter {i}] Time for CMA-ES {time.time() - start_time}", flush=True)
         for idx in np.argsort(-1*np.array(best_vals)):
             X_next_point =  torch.from_numpy(best_points[idx]).float().unsqueeze(0)
             # Y_next_point = [model_forward_api.eval(X_next_point)]
             
+            print(f"[run][iter {i}] Evaluating candidate idx={idx}", flush=True)
             X_next_points_return = [model_forward_api.eval(X_next_point)]
             Y_next_point = [X[0] for X in X_next_points_return]
             Y_scores_next_points = [X[1].squeeze() for X in X_next_points_return]
@@ -343,9 +377,9 @@ def run(args):
         covar_module = ScaleKernel(base_kernel=CombinedStringKernel(base_latent_kernel=matern_kernel, instruction_kernel=matern_kernel_instruction, latent_train=X_train.double(), instruction_train=Y_scores))
         gp_model = SingleTaskGP(X_train, y_train, covar_module=covar_module)
         gp_mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
-        print(f"Best value found till now: {torch.max(Y)}")
+        print(f"[run][iter {i}] Best value found till now: {torch.max(Y)}", flush=True)
 
-    print('Evaluate on test data...')
+    print('Evaluate on test data...', flush=True)
     prompts = model_forward_api.return_best_prompt()
     print("Best instruction is:")
     print(prompts)
@@ -354,7 +388,7 @@ def run(args):
     print(model_forward_api.return_prompts_set())
 
     # Evaluate on test data
-    print('Evaluating on test data...')
+    print('Evaluating on test data...', flush=True)
 
     test_conf = get_test_conf(task, test_data)
     

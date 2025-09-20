@@ -47,19 +47,27 @@ class CombinedStringKernel(Kernel):
 
 
 def cma_es_concat(starting_point_for_cma, EI, tkwargs):
+        print('[cma_es_concat] Enter', flush=True)
         if starting_point_for_cma.type() == 'torch.cuda.DoubleTensor':
             starting_point_for_cma = starting_point_for_cma.detach().cpu().squeeze()
+        print(f"[cma_es_concat] x0 shape={np.array(starting_point_for_cma).shape}", flush=True)
         es = cma.CMAEvolutionStrategy(x0=starting_point_for_cma, sigma0=0.8, inopts={'bounds': [-1, 1], "popsize": 50},)
         iter = 1
         while not es.stop():
             iter += 1
+            print(f"[cma_es_concat] iter={iter} asking population...", flush=True)
             xs = es.ask()
+            print(f"[cma_es_concat] iter={iter} got {len(xs)} candidates", flush=True)
             X = torch.tensor(np.array(xs)).float().unsqueeze(1).to(**tkwargs)
             with torch.no_grad():
-                Y = -1 * EI(X)
+                try:
+                    Y = -1 * EI(X)
+                except Exception as e:
+                    print(f"[cma_es_concat] EI evaluation error: {e}", flush=True)
+                    raise
             es.tell(xs, Y.cpu().numpy())  # return the result to the optimizer
-            print("current best")
-            print(f"{es.best.f}")
+            print("[cma_es_concat] current best", flush=True)
+            print(f"{es.best.f}", flush=True)
             if (iter > 10):
                 break
 

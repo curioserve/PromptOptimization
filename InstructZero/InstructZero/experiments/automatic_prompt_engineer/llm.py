@@ -27,28 +27,40 @@ async def dispatch_openai_requests(
     frequency_penalty: int,
     presence_penalty: int
 ) -> list[str]:
-    """Dispatches requests to OpenAI API asynchronously.
+    """Dispatches requests to OpenAI API asynchronously with debug logs and timeouts.
     
     Args:
         messages_list: List of messages to be sent to OpenAI ChatCompletion API.
-        model: OpenAI model to use.
+        model: OpenAI-compatible chat model to use.
         temperature: Temperature to use for the model.
         max_tokens: Maximum number of tokens to generate.
-        top_p: Top p to use for the model.
     Returns:
         List of responses from OpenAI API.
     """
-    # for x in messages_list:
-        # try:
-    async_responses = [openai.ChatCompletion.acreate(
+    timeout_s = float(os.getenv("OPENAI_TIMEOUT", "60"))
+    print(f"[dispatch_openai_requests] dispatching {len(messages_list)} prompts to model={model} with timeout={timeout_s}s", flush=True)
+
+    async def _with_timeout(coro):
+        return await asyncio.wait_for(coro, timeout=timeout_s)
+
+    tasks = []
+    for x in messages_list:
+        tasks.append(_with_timeout(openai.ChatCompletion.acreate(
             model=model,
             messages=x,
             temperature=temperature,
             max_tokens=max_tokens,
             frequency_penalty=frequency_penalty,
-            presence_penalty=presence_penalty) for x in messages_list]
+            presence_penalty=presence_penalty
+        )))
 
-    return await asyncio.gather(*async_responses)
+    try:
+        results = await asyncio.gather(*tasks)
+        print(f"[dispatch_openai_requests] received {len(results)} responses", flush=True)
+        return results
+    except Exception as e:
+        print(f"[dispatch_openai_requests] ERROR: {e}", flush=True)
+        raise
 
 
 def model_from_config(config, disable_tqdm=True):
@@ -414,6 +426,7 @@ class GPT_Forward(LLM):
         while answer is None:
             try:
                 gcfg = self.config.get('gpt_config', {})
+                print(f"[GPT_Forward.__async_generate] dispatching {len(ml)} messages to model={gcfg.get('model', 'gpt-3.5-turbo')} ...", flush=True)
                 predictions = asyncio.run(dispatch_openai_requests(
                     messages_list = ml,
                     model=gcfg.get('model', 'gpt-3.5-turbo'),
@@ -422,6 +435,7 @@ class GPT_Forward(LLM):
                     frequency_penalty=gcfg.get('frequency_penalty', 0),
                     presence_penalty=gcfg.get('presence_penalty', 0)
                     ))
+                print("[GPT_Forward.__async_generate] responses received", flush=True)
             except Exception as e:
                 # if 'is greater than the maximum' in str(e):
                 #     raise BatchSizeException()
