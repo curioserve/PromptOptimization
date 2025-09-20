@@ -168,7 +168,8 @@ class LMForwardAPI:
         input_text = (
             f"{self.system_prompt}\n"
             f"USER: Given the following input-output examples, infer a single concise instruction that describes the task. "
-            f"Respond with one clear sentence and no extra symbols.\n{self.init_token}\nASSISTANT:"
+            f"Respond with one clear sentence and no extra symbols. Do not repeat any text above. Start with an imperative verb.\n"
+            f"{self.init_token}\nASSISTANT:"
         )
         print('[LMForwardAPI.eval] Tokenizing input_text...', flush=True)
         input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
@@ -187,14 +188,20 @@ class LMForwardAPI:
         outputs = self.model.generate(
             inputs_embeds=input_embed,
             attention_mask=attn_mask,
-            max_new_tokens=64,
+            max_new_tokens=128,
+            min_new_tokens=16,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
             do_sample=False,
             num_beams=1,
+            no_repeat_ngram_size=6,
+            repetition_penalty=1.1,
         )
         print(f"[LMForwardAPI.eval] model.generate done in {time.time()-_tgen:.2f}s", flush=True)
-        instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        # Decode only newly generated tokens (exclude prompt tokens)
+        init_len = input_embed.shape[1]
+        gen_tokens = outputs[:, init_len:]
+        instruction = self.tokenizer.batch_decode(gen_tokens, skip_special_tokens=True)
         print(f"[LMForwardAPI.eval] Decoded instruction length={len(instruction[0]) if instruction else 0}", flush=True)
         # postprocess instruction: keep a clean single sentence with letters
         try:
@@ -205,8 +212,15 @@ class LMForwardAPI:
             # Take the first line/sentence with alphabets
             candidates = re.split(r"[\n]+|(?<=[\.!?])\s+", raw)
             candidates = [c.strip() for c in candidates if any(ch.isalpha() for ch in c)]
+            # Prefer a candidate that doesn't echo the header
+            header_phrase = "below are input/output examples"
             if candidates:
-                cleaned = candidates[0]
+                chosen = None
+                for c in candidates:
+                    if header_phrase not in c.lower() and len(c) >= 12:
+                        chosen = c
+                        break
+                cleaned = chosen if chosen is not None else candidates[0]
                 # Collapse repeated punctuation
                 cleaned = re.sub(r"[\.,;:!?\-]{2,}", lambda m: m.group(0)[0], cleaned)
                 # Trim leading/trailing punctuation
@@ -219,8 +233,8 @@ class LMForwardAPI:
         if not any(ch.isalpha() for ch in instruction[0]) or len(instruction[0]) < 10:
             print('[LMForwardAPI.eval] Fallback to text-only induction (no soft prompt)', flush=True)
             plain_text = (
-                "Below are input/output examples for a single task. "
-                "Write one concise English instruction describing the task. Only output the instruction.\n\n"
+                "Using the following input/output examples, write one concise English instruction describing the task. "
+                "Only output the instruction in a single sentence starting with an imperative verb.\n\n"
                 f"{self.init_token}\n\nInstruction:"
             )
             enc = self.tokenizer(plain_text, return_tensors="pt")
@@ -230,11 +244,17 @@ class LMForwardAPI:
                 input_ids=input_ids,
                 attention_mask=attn_mask,
                 max_new_tokens=32,
+                min_new_tokens=16,
                 do_sample=False,
                 eos_token_id=self.tokenizer.eos_token_id,
                 pad_token_id=self.tokenizer.pad_token_id,
+                no_repeat_ngram_size=6,
+                repetition_penalty=1.1,
             )
-            inst2 = self.tokenizer.batch_decode(outputs2, skip_special_tokens=True)
+            # Decode only newly generated tokens
+            input_len = input_ids.shape[1]
+            gen2 = outputs2[:, input_len:]
+            inst2 = self.tokenizer.batch_decode(gen2, skip_special_tokens=True)
             # Clean again
             try:
                 import re
@@ -243,8 +263,15 @@ class LMForwardAPI:
                 cands = re.split(r"[\n]+|(?<=[\.!?])\s+", raw2)
                 cands = [c.strip() for c in cands if any(ch.isalpha() for ch in c)]
                 if cands:
-                    cleaned2 = cands[0]
-                    cleaned2 = re.sub(r"[\.,;:!?\-]{2,}", lambda m: m.group(0)[0], cleaned2)
+                    banned = ("input", "output", "examples", "instruction")
+                    chosen2 = None
+                    for c in cands:
+                        cl = c.lower()
+                        if all(b not in cl for b in banned) and len(c) >= 12:
+                            chosen2 = c
+                            break
+                    cleaned2 = chosen2 if chosen2 is not None else cands[0]
+                    cleaned2 = re.sub(r"[\.,;:!\?\-]{2,}", lambda m: m.group(0)[0], cleaned2)
                     cleaned2 = re.sub(r"^[\W_]+|[\W_]+$", "", cleaned2)
                     instruction[0] = cleaned2
             except Exception as e:
