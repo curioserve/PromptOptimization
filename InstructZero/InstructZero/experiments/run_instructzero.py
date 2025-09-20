@@ -105,8 +105,8 @@ class LMForwardAPI:
             print('[Embedding] mu: {} | std: {} [RandProj]  mu: {} | std: {}'.format(mu_hat, std_hat, mu, std), flush=True)
             torch.nn.init.normal_(self.linear.weight, -1, 1)
         elif random_proj == 'uniform':  
-            # Start with a very small soft prompt so the base prompt dominates initially
-            torch.nn.init.uniform_(self.linear.weight, -1e-3, 1e-3)
+            # Use a larger initialization range to ensure meaningful soft prompt signal
+            torch.nn.init.uniform_(self.linear.weight, -0.1, 0.1)
 
         ## eval preparation
         print('[LMForwardAPI.__init__] Updating config...', flush=True)
@@ -175,7 +175,8 @@ class LMForwardAPI:
         input_embed = self.embedding[input_ids]
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
         # Scale soft prompt to the embedding manifold and anchor to init prompt
-        prompt_embedding = torch.tanh(prompt_embedding) * self.embed_std + self.embed_mu
+        # Use a more aggressive scaling to ensure the soft prompt has meaningful impact
+        prompt_embedding = torch.tanh(prompt_embedding) * self.embed_std * 2.0 + self.embed_mu
         if self.init_prompt is not None:
             prompt_embedding = prompt_embedding + self.init_prompt  # broadcast over prompt tokens
         input_embed = torch.cat((prompt_embedding, input_embed), 1)
@@ -187,14 +188,16 @@ class LMForwardAPI:
         outputs = self.model.generate(
             inputs_embeds=input_embed,
             attention_mask=attn_mask,
-            max_new_tokens=128,
-            min_new_tokens=16,
+            max_new_tokens=64,
+            min_new_tokens=8,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
-            do_sample=False,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
             num_beams=1,
-            no_repeat_ngram_size=6,
-            repetition_penalty=1.1,
+            no_repeat_ngram_size=3,
+            repetition_penalty=1.2,
         )
         print(f"[LMForwardAPI.eval] model.generate done in {time.time()-_tgen:.2f}s", flush=True)
         # Decode only newly generated tokens (exclude prompt tokens)
@@ -202,6 +205,7 @@ class LMForwardAPI:
         gen_tokens = outputs[:, init_len:]
         instruction = self.tokenizer.batch_decode(gen_tokens, skip_special_tokens=True)
         print(f"[LMForwardAPI.eval] Decoded instruction length={len(instruction[0]) if instruction else 0}", flush=True)
+        print(f"[LMForwardAPI.eval] Raw decoded instruction: {instruction}", flush=True)
         # postprocess instruction: keep a clean single sentence with letters
         try:
             import re
