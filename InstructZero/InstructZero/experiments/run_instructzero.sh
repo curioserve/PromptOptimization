@@ -24,13 +24,11 @@ export OPENAI_TIMEOUT=${OPENAI_TIMEOUT:-60}
 
 datasets=(informal_to_formal odd_one_out second_word_letter synonyms word_sorting letters_list)
 
-for i in ${datasets[@]}; do
-    echo $i
-    python experiments/run_instructzero.py \
-    --task $i \
-    --random_proj ${RANDOM_PROJ} \
-    --n_prompt_tokens $SFT \
-    --intrinsic_dim $INTRINSIC_DIM \
-    --HF_cache_dir ${model_dir} \
-    --model_name ${MODEL_NAME}
-done
+
+python experiments/run_instructzero.py \
+--task math500_highconf.json \
+--random_proj ${RANDOM_PROJ} \
+--n_prompt_tokens $SFT \
+--intrinsic_dim $INTRINSIC_DIM \
+--HF_cache_dir ${model_dir} \
+--model_name ${MODEL_NAME}
