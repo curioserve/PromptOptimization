@@ -12,6 +12,11 @@ MODEL_NAME='gpt-oss-20b'
 export HF_HOME=${HF_HOME:-/fs/nexus-scratch/bobchen}
 export TRANSFORMERS_CACHE=$HF_HOME
 # Optionally source a local secrets file (not committed) for OpenRouter/OpenAI keys
+# Try repo root, current working directory, then $HOME
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+if [ -f "$REPO_ROOT/.openrouter.env" ]; then source "$REPO_ROOT/.openrouter.env"; fi
+if [ -f "$PWD/.openrouter.env" ]; then source "$PWD/.openrouter.env"; fi
 if [ -f "$HOME/.openrouter.env" ]; then source "$HOME/.openrouter.env"; fi
 # Configure evaluation black-box via OpenRouter
 export OPENAI_API_BASE=${OPENAI_API_BASE:-https://openrouter.ai/api/v1}
