@@ -236,10 +236,16 @@ class LMForwardAPI:
 def run(args):
     print('[run] Starting run(args)', flush=True)
     task, HF_cache_dir = args.task, args.HF_cache_dir
+    # Accept tasks provided as "name.json" by stripping the extension
+    if isinstance(task, str) and task.endswith('.json'):
+        print(f"[run] Stripping .json from task '{task}'", flush=True)
+        task = task[:-5]
+    # Update args.task to normalized form for downstream code
+    args.task = task
     random_proj, intrinsic_dim, n_prompt_tokens= args.random_proj, args.intrinsic_dim, args.n_prompt_tokens
     print(f"[run] task={task} | HF_cache_dir={HF_cache_dir} | random_proj={random_proj} | intrinsic_dim={intrinsic_dim} | n_prompt_tokens={n_prompt_tokens}", flush=True)
 
-    assert args.task in TASKS, 'Task not found!'
+    assert task in TASKS, f"Task not found! Provided: {task}. Available: {TASKS}"
 
     print('[run] Loading data...', flush=True)
     induce_data, test_data = load_data('induce', task), load_data('eval', task)
