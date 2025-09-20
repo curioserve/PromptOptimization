@@ -43,13 +43,30 @@ class LMForwardAPI:
         if self.ops_model in ["vicuna", "wizardlm", 'openchat', 'gpt-oss-20b']:
             print("[LMForwardAPI.__init__] Loading model.from_pretrained...", flush=True)
             _t0 = time.time()
+            # Build a max_memory map to utilize all visible GPUs and reduce CPU offload
+            max_memory = {}
+            cpu_mem = os.getenv('CPU_MAX_MEMORY', '64GiB')
+            if torch.cuda.is_available():
+                util_frac = float(os.getenv('GPU_UTILIZATION_FRACTION', '0.90'))
+                reserve_gb = float(os.getenv('GPU_MEMORY_RESERVE_GB', '0'))
+                for i in range(torch.cuda.device_count()):
+                    total_gb = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                    alloc_gb = max(1, int(total_gb * util_frac - reserve_gb))
+                    max_memory[f"cuda:{i}"] = f"{alloc_gb}GiB"
+            max_memory['cpu'] = cpu_mem
+            print(f"[LMForwardAPI.__init__] max_memory={max_memory}", flush=True)
             self.model = AutoModelForCausalLM.from_pretrained(
                 HF_cache_dir,
                 low_cpu_mem_usage=True,
                 device_map="auto",
+                max_memory=max_memory,
                 **kwargs,
             )
             print(f"[LMForwardAPI.__init__] Model loaded in {time.time()-_t0:.2f}s", flush=True)
+            try:
+                print(f"[LMForwardAPI.__init__] device_map={getattr(self.model, 'hf_device_map', None)}", flush=True)
+            except Exception:
+                pass
 
             print("[LMForwardAPI.__init__] Loading tokenizer.from_pretrained...", flush=True)
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -164,12 +181,11 @@ class LMForwardAPI:
                 f'[Prompt Embedding] Only support [list, numpy.ndarray], got `{type(prompt_embedding)}` instead.'
             )
         # create the input text with the system prompt  
-        # Encourage a clean single-sentence instruction
+        # Encourage a clean single-sentence instruction (plain, non-chat template)
         input_text = (
-            f"{self.system_prompt}\n"
-            f"USER: Given the following input-output examples, infer a single concise instruction that describes the task. "
-            f"Respond with one clear sentence and no extra symbols. Do not repeat any text above. Start with an imperative verb.\n"
-            f"{self.init_token}\nASSISTANT:"
+            "Using the following input/output examples, write one concise English instruction describing the task. "
+            "Only output the instruction in a single sentence starting with an imperative verb.\n\n"
+            f"{self.init_token}\n\nInstruction:"
         )
         print('[LMForwardAPI.eval] Tokenizing input_text...', flush=True)
         input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
@@ -213,11 +229,12 @@ class LMForwardAPI:
             candidates = re.split(r"[\n]+|(?<=[\.!?])\s+", raw)
             candidates = [c.strip() for c in candidates if any(ch.isalpha() for ch in c)]
             # Prefer a candidate that doesn't echo the header
-            header_phrase = "below are input/output examples"
+            header_phrases = ("below are input/output examples", "using the following input/output examples")
             if candidates:
                 chosen = None
                 for c in candidates:
-                    if header_phrase not in c.lower() and len(c) >= 12:
+                    lc = c.lower()
+                    if all(h not in lc for h in header_phrases) and len(c) >= 12:
                         chosen = c
                         break
                 cleaned = chosen if chosen is not None else candidates[0]
@@ -229,8 +246,9 @@ class LMForwardAPI:
         except Exception as e:
             print(f"[LMForwardAPI.eval] postprocess error: {e}", flush=True)
 
-        # If the instruction is still non-linguistic (e.g., mostly punctuation), fall back to text-only induction
-        if not any(ch.isalpha() for ch in instruction[0]) or len(instruction[0]) < 10:
+        # If the instruction is still non-linguistic (e.g., mostly punctuation), optionally fall back to text-only induction
+        disable_fb = os.getenv('INDUCTION_DISABLE_FALLBACK', '1') == '1'
+        if (not any(ch.isalpha() for ch in instruction[0]) or len(instruction[0]) < 10) and not disable_fb:
             print('[LMForwardAPI.eval] Fallback to text-only induction (no soft prompt)', flush=True)
             plain_text = (
                 "Using the following input/output examples, write one concise English instruction describing the task. "
