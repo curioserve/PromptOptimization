@@ -49,10 +49,13 @@ class LMForwardAPI:
             if torch.cuda.is_available():
                 util_frac = float(os.getenv('GPU_UTILIZATION_FRACTION', '0.90'))
                 reserve_gb = float(os.getenv('GPU_MEMORY_RESERVE_GB', '0'))
-                for i in range(torch.cuda.device_count()):
+                num_gpus = torch.cuda.device_count()
+                print(f"[LMForwardAPI.__init__] torch.cuda.device_count()={num_gpus}", flush=True)
+                for i in range(num_gpus):
                     total_gb = torch.cuda.get_device_properties(i).total_memory / (1024**3)
                     alloc_gb = max(1, int(total_gb * util_frac - reserve_gb))
-                    max_memory[f"cuda:{i}"] = f"{alloc_gb}GiB"
+                    # IMPORTANT: accelerate expects integer GPU ids as keys, not 'cuda:i'
+                    max_memory[i] = f"{alloc_gb}GiB"
             max_memory['cpu'] = cpu_mem
             print(f"[LMForwardAPI.__init__] max_memory={max_memory}", flush=True)
             self.model = AutoModelForCausalLM.from_pretrained(
