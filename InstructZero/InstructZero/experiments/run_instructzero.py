@@ -10,6 +10,17 @@ import os
 import re
 from misc import get_test_conf, get_conf
 
+# Monkey patch to disable problematic warmup that causes CUDA busy errors
+def _dummy_warmup(*args, **kwargs):
+    pass
+
+try:
+    from transformers.modeling_utils import caching_allocator_warmup
+    import transformers.modeling_utils
+    transformers.modeling_utils.caching_allocator_warmup = _dummy_warmup
+except ImportError:
+    pass
+
 from torch.quasirandom import SobolEngine
 from botorch.models import SingleTaskGP
 from gpytorch.mlls import ExactMarginalLogLikelihood
