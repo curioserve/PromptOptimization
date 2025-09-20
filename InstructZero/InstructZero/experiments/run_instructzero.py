@@ -55,7 +55,7 @@ class LMForwardAPI:
             self.tokenizer = AutoTokenizer.from_pretrained(
                                 HF_cache_dir,
                                 model_max_length=1024,
-                                padding_side="left",
+                                padding_side="right",
                                 use_fast=False,
                             )
             print("[LMForwardAPI.__init__] Tokenizer loaded", flush=True)
@@ -105,7 +105,8 @@ class LMForwardAPI:
             print('[Embedding] mu: {} | std: {} [RandProj]  mu: {} | std: {}'.format(mu_hat, std_hat, mu, std), flush=True)
             torch.nn.init.normal_(self.linear.weight, -1, 1)
         elif random_proj == 'uniform':  
-            torch.nn.init.uniform_(self.linear.weight, -0.5, 0.5)
+            # Start with a very small soft prompt so the base prompt dominates initially
+            torch.nn.init.uniform_(self.linear.weight, -1e-3, 1e-3)
 
         ## eval preparation
         print('[LMForwardAPI.__init__] Updating config...', flush=True)
@@ -213,6 +214,41 @@ class LMForwardAPI:
                 instruction[0] = cleaned
         except Exception as e:
             print(f"[LMForwardAPI.eval] postprocess error: {e}", flush=True)
+
+        # If the instruction is still non-linguistic (e.g., mostly punctuation), fall back to text-only induction
+        if not any(ch.isalpha() for ch in instruction[0]) or len(instruction[0]) < 10:
+            print('[LMForwardAPI.eval] Fallback to text-only induction (no soft prompt)', flush=True)
+            plain_text = (
+                "Below are input/output examples for a single task. "
+                "Write one concise English instruction describing the task. Only output the instruction.\n\n"
+                f"{self.init_token}\n\nInstruction:"
+            )
+            enc = self.tokenizer(plain_text, return_tensors="pt")
+            input_ids = enc.input_ids.to(self.model.device)
+            attn_mask = enc.attention_mask.to(self.model.device) if 'attention_mask' in enc else None
+            outputs2 = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attn_mask,
+                max_new_tokens=32,
+                do_sample=False,
+                eos_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+            inst2 = self.tokenizer.batch_decode(outputs2, skip_special_tokens=True)
+            # Clean again
+            try:
+                import re
+                raw2 = inst2[0]
+                raw2 = re.sub(r"[^\x20-\x7E]", " ", raw2)
+                cands = re.split(r"[\n]+|(?<=[\.!?])\s+", raw2)
+                cands = [c.strip() for c in cands if any(ch.isalpha() for ch in c)]
+                if cands:
+                    cleaned2 = cands[0]
+                    cleaned2 = re.sub(r"[\.,;:!?\-]{2,}", lambda m: m.group(0)[0], cleaned2)
+                    cleaned2 = re.sub(r"^[\W_]+|[\W_]+$", "", cleaned2)
+                    instruction[0] = cleaned2
+            except Exception as e:
+                print(f"[LMForwardAPI.eval] text-only postprocess error: {e}", flush=True)
         # instruction[0] = 'The instruction was to ' + instruction[0]
         # import pdb; pdb.set_trace()
         # start = instruction[0].find('The instruction was to')
