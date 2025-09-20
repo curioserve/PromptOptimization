@@ -45,9 +45,10 @@ def get_test_conf(task, test_data):
                     'num_samples': min(100, len(test_data[0])),
                     'task': task,
                     'model': {
-                        "name": "GPT_forward",
+                        'name': 'GPT_forward',
+                        'batch_size': int(os.environ.get('EVAL_BATCH_SIZE', '10')),
                         'gpt_config': {
-                            'model': 'GPT-3.5-turbo',
+                            'model': os.environ.get('EVAL_API_MODEL', 'openai/gpt-oss-20b'),
                         }
                     }
                 }
@@ -72,8 +73,10 @@ def get_conf(task, eval_data):
             'task': task,
             'num_samples': min(20, len(eval_data[0])),
             'model': {
+                'name': 'GPT_forward',
+                'batch_size': int(os.environ.get('EVAL_BATCH_SIZE', '10')),
                 'gpt_config': {
-                    # 'model': 'text-ada-001'
+                    'model': os.environ.get('EVAL_API_MODEL', 'openai/gpt-oss-20b'),
                 }
             }
         }

@@ -39,7 +39,7 @@ class LMForwardAPI:
             }
         self.ops_model = model_name
         # import pdb; pdb.set_trace()
-        if self.ops_model in ["vicuna", "wizardlm", 'openchat']:
+        if self.ops_model in ["vicuna", "wizardlm", 'openchat', 'gpt-oss-20b']:
             self.model = AutoModelForCausalLM.from_pretrained(
                 HF_cache_dir,
                 low_cpu_mem_usage=True,
@@ -57,7 +57,7 @@ class LMForwardAPI:
             raise NotImplementedError
 
         self.init_token = init_prompt[0] + init_qa[0]
-        if self.ops_model in ['wizardlm', 'vicuna', 'openchat']:
+        if self.ops_model in ['wizardlm', 'vicuna', 'openchat', 'gpt-oss-20b']:
             self.embedding = self.model.get_input_embeddings().weight.clone()
             input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.cuda()
             self.init_prompt = self.embedding[input_ids]
@@ -71,17 +71,14 @@ class LMForwardAPI:
         # Create the template for Vicuna and WizardLM
         self.count = 0
         self.linear = torch.nn.Linear(intrinsic_dim, self.n_prompt_tokens * self.hidden_size, bias=False)
-        if self.ops_model == 'vicuna':
-            self.system_prompt = "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions."
-            self.role = ['USER:', 'ASSISTANT:']
-        elif self.ops_model == 'wizardlm':
+        if self.ops_model in ['vicuna', 'wizardlm', 'openchat', 'gpt-oss-20b']:
             self.system_prompt = "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions."
             self.role = ['USER:', 'ASSISTANT:']
         elif self.ops_model == 'alpaca':
             self.system_prompt= "Below is an instruction that describes a task. Write a response that appropriately completes the request."
             self.role = ["### Instruction:", "### Response:"]
         else:
-            NotImplementedError
+            raise NotImplementedError
             
 
         if random_proj == 'normal':

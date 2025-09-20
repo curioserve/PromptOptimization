@@ -1,3 +1,7 @@
 transformers>=4.35.0
 datasets>=2.14.0
 tqdm>=4.64.0
+cma>=3.2.2
+gpytorch>=1.11
+botorch>=0.8.5
+openai>=0.28.0,<1.0.0

@@ -276,6 +276,14 @@ class GPT_Forward(LLM):
         self.config = config
         self.needs_confirmation = needs_confirmation
         self.disable_tqdm = disable_tqdm
+        # Configure OpenAI/OpenRouter settings from environment
+        # OPENAI_API_KEY and OPENAI_API_BASE are respected by the openai SDK
+        api_base = os.getenv("OPENAI_API_BASE")
+        if api_base:
+            openai.api_base = api_base
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            openai.api_key = api_key
 
     def confirm_cost(self, texts, n, max_tokens):
         total_estimated_cost = 0
@@ -367,7 +375,7 @@ class GPT_Forward(LLM):
         """Generates text from the model."""
         if not isinstance(prompt, list):
             text = [prompt]
-        config = self.config['gpt_config'].copy()
+        config = self.config.get('gpt_config', {}).copy()
         config['n'] = n
         answer = []
         # If there are any [APE] tokens in the prompts, remove them
@@ -378,12 +386,12 @@ class GPT_Forward(LLM):
             while response is None:
                 try:
                     response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
+                        model=config.get('model', 'gpt-3.5-turbo'),
                         messages=[{"role": "user", "content": prompt_single}],
-                        temperature=0.0,
-                        max_tokens=256,
-                        frequency_penalty=0,
-                        presence_penalty=0)
+                        temperature=config.get('temperature', 0.0),
+                        max_tokens=config.get('max_tokens', 256),
+                        frequency_penalty=config.get('frequency_penalty', 0),
+                        presence_penalty=config.get('presence_penalty', 0))
 
                 except Exception as e:
                     if 'is greater than the maximum' in str(e):
@@ -405,15 +413,15 @@ class GPT_Forward(LLM):
 
         while answer is None:
             try:
+                gcfg = self.config.get('gpt_config', {})
                 predictions = asyncio.run(dispatch_openai_requests(
                     messages_list = ml,
-                    model='gpt-3.5-turbo',
-                    temperature=0,
-                    max_tokens=256,
-                    frequency_penalty=0,
-                    presence_penalty=0
-                    )
-                )
+                    model=gcfg.get('model', 'gpt-3.5-turbo'),
+                    temperature=gcfg.get('temperature', 0),
+                    max_tokens=gcfg.get('max_tokens', 256),
+                    frequency_penalty=gcfg.get('frequency_penalty', 0),
+                    presence_penalty=gcfg.get('presence_penalty', 0)
+                    ))
             except Exception as e:
                 # if 'is greater than the maximum' in str(e):
                 #     raise BatchSizeException()
