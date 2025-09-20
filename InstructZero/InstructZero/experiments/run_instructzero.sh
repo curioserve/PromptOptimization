@@ -1,4 +1,7 @@
-export CUDA_VISIBLE_DEVICES=0
+# Respect user's CUDA_VISIBLE_DEVICES; only set a default if not provided
+if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+  export CUDA_VISIBLE_DEVICES=0
+fi
 # Unbuffered python output for real-time logs
 export PYTHONUNBUFFERED=1
 SFT=5
