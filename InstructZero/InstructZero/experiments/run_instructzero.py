@@ -13,7 +13,7 @@ from misc import get_test_conf, get_conf
 from torch.quasirandom import SobolEngine
 from botorch.models import SingleTaskGP
 from gpytorch.mlls import ExactMarginalLogLikelihood
-from botorch import fit_gpytorch_model
+from botorch.fit import fit_gpytorch_mll
 from botorch.acquisition.analytic import ExpectedImprovement
 from gpytorch.kernels import ScaleKernel, MaternKernel
 from gpytorch.priors import GammaPrior
@@ -216,7 +216,7 @@ class LMForwardAPI:
         return self.prompts_set
     
 def run(args):
-    task, HF_cache_dir=args.task, args.HF_cache_dir
+    task, HF_cache_dir = args.task, args.HF_cache_dir
     random_proj, intrinsic_dim, n_prompt_tokens= args.random_proj, args.intrinsic_dim, args.n_prompt_tokens
 
     assert args.task in TASKS, 'Task not found!'
@@ -293,7 +293,7 @@ def run(args):
 
         start_time = time.time()
 
-        fit_gpytorch_model(gp_mll)#, options = {'maxiter':10})
+        fit_gpytorch_mll(gp_mll)#, options = {'maxiter':10})
         print(f"Fitting done in {time.time()-start_time}")
         start_time = time.time()
         EI = ExpectedImprovement(gp_model, best_f = y_train.max().item())
