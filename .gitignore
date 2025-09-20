@@ -3,3 +3,4 @@ venv/
 **/__pycache__/
 *.pyc
 gpt-oss-20b-BF16/
+.openrouter.env

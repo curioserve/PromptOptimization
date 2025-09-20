@@ -64,10 +64,13 @@ class LMForwardAPI:
 
         self.init_token = init_prompt[0] + init_qa[0]
         if self.ops_model in ['wizardlm', 'vicuna', 'openchat', 'gpt-oss-20b']:
-            print("[LMForwardAPI.__init__] Building input embeddings for init prompt...", flush=True)
+            print('[LMForwardAPI.__init__] Building input embeddings for init prompt...', flush=True)
             self.embedding = self.model.get_input_embeddings().weight.clone()
             input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.cuda()
             self.init_prompt = self.embedding[input_ids]
+            # Stats for scaling soft prompt to embedding manifold
+            self.embed_mu = self.embedding.reshape(-1).mean().item()
+            self.embed_std = self.embedding.reshape(-1).std().item()
             
         ################# setup n_prompts_token #################
         self.n_prompt_tokens = n_prompt_tokens
@@ -94,15 +97,15 @@ class LMForwardAPI:
                 print('Get the embedding firstly to avoid issues', flush=True)
             else:
                 raise NotImplementedError
-            mu_hat = self.embedding.reshape(-1).mean().item()
-            std_hat = self.embedding.reshape(-1).std().item()
+            mu_hat = self.embed_mu
+            std_hat = self.embed_std
             mu = 0.0
             std = args.alpha * std_hat / (np.sqrt(intrinsic_dim) * args.sigma)
 
             print('[Embedding] mu: {} | std: {} [RandProj]  mu: {} | std: {}'.format(mu_hat, std_hat, mu, std), flush=True)
             torch.nn.init.normal_(self.linear.weight, -1, 1)
         elif random_proj == 'uniform':  
-            torch.nn.init.uniform_(self.linear.weight, -1, 1)
+            torch.nn.init.uniform_(self.linear.weight, -0.5, 0.5)
 
         ## eval preparation
         print('[LMForwardAPI.__init__] Updating config...', flush=True)
@@ -160,20 +163,56 @@ class LMForwardAPI:
                 f'[Prompt Embedding] Only support [list, numpy.ndarray], got `{type(prompt_embedding)}` instead.'
             )
         # create the input text with the system prompt  
-        input_text = f"{self.system_prompt} USER:{self.init_token} ASSISTANT:"
+        # Encourage a clean single-sentence instruction
+        input_text = (
+            f"{self.system_prompt}\n"
+            f"USER: Given the following input-output examples, infer a single concise instruction that describes the task. "
+            f"Respond with one clear sentence and no extra symbols.\n{self.init_token}\nASSISTANT:"
+        )
         print('[LMForwardAPI.eval] Tokenizing input_text...', flush=True)
         input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
         input_embed = self.embedding[input_ids]
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
+        # Scale soft prompt to the embedding manifold and anchor to init prompt
+        prompt_embedding = torch.tanh(prompt_embedding) * self.embed_std + self.embed_mu
+        if self.init_prompt is not None:
+            prompt_embedding = prompt_embedding + self.init_prompt  # broadcast over prompt tokens
         input_embed = torch.cat((prompt_embedding, input_embed), 1)
 
         print('[LMForwardAPI.eval] Calling model.generate...', flush=True)
         _tgen = time.time()
-        outputs = self.model.generate(inputs_embeds=input_embed, max_new_tokens=128)
+        # Build attention mask for inputs_embeds
+        attn_mask = torch.ones(input_embed.shape[:2], dtype=torch.long, device=input_embed.device)
+        outputs = self.model.generate(
+            inputs_embeds=input_embed,
+            attention_mask=attn_mask,
+            max_new_tokens=64,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,
+            do_sample=False,
+            num_beams=1,
+        )
         print(f"[LMForwardAPI.eval] model.generate done in {time.time()-_tgen:.2f}s", flush=True)
         instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
         print(f"[LMForwardAPI.eval] Decoded instruction length={len(instruction[0]) if instruction else 0}", flush=True)
-        # postprocess instruction
+        # postprocess instruction: keep a clean single sentence with letters
+        try:
+            import re
+            raw = instruction[0]
+            # Remove non-printable chars
+            raw = re.sub(r"[^\x20-\x7E]", " ", raw)
+            # Take the first line/sentence with alphabets
+            candidates = re.split(r"[\n]+|(?<=[\.!?])\s+", raw)
+            candidates = [c.strip() for c in candidates if any(ch.isalpha() for ch in c)]
+            if candidates:
+                cleaned = candidates[0]
+                # Collapse repeated punctuation
+                cleaned = re.sub(r"[\.,;:!?\-]{2,}", lambda m: m.group(0)[0], cleaned)
+                # Trim leading/trailing punctuation
+                cleaned = re.sub(r"^[\W_]+|[\W_]+$", "", cleaned)
+                instruction[0] = cleaned
+        except Exception as e:
+            print(f"[LMForwardAPI.eval] postprocess error: {e}", flush=True)
         # instruction[0] = 'The instruction was to ' + instruction[0]
         # import pdb; pdb.set_trace()
         # start = instruction[0].find('The instruction was to')
