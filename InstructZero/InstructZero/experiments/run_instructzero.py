@@ -10,17 +10,6 @@ import os
 import re
 from misc import get_test_conf, get_conf
 
-# Monkey patch to disable problematic warmup that causes CUDA busy errors
-def _dummy_warmup(*args, **kwargs):
-    pass
-
-try:
-    from transformers.modeling_utils import caching_allocator_warmup
-    import transformers.modeling_utils
-    transformers.modeling_utils.caching_allocator_warmup = _dummy_warmup
-except ImportError:
-    pass
-
 from torch.quasirandom import SobolEngine
 from botorch.models import SingleTaskGP
 from gpytorch.mlls import ExactMarginalLogLikelihood
@@ -45,7 +34,7 @@ class LMForwardAPI:
         p = torch.ones(10)
         
         kwargs={
-            'torch_dtype': torch.bfloat16,
+            'torch_dtype': torch.float16,
             'use_cache': True
             }
         self.ops_model = model_name
@@ -54,34 +43,13 @@ class LMForwardAPI:
         if self.ops_model in ["vicuna", "wizardlm", 'openchat', 'gpt-oss-20b']:
             print("[LMForwardAPI.__init__] Loading model.from_pretrained...", flush=True)
             _t0 = time.time()
-            # Build a max_memory map to utilize all visible GPUs and reduce CPU offload
-            max_memory = {}
-            cpu_mem = os.getenv('CPU_MAX_MEMORY', '64GiB')
-            if torch.cuda.is_available():
-                util_frac = float(os.getenv('GPU_UTILIZATION_FRACTION', '0.90'))
-                reserve_gb = float(os.getenv('GPU_MEMORY_RESERVE_GB', '0'))
-                num_gpus = torch.cuda.device_count()
-                print(f"[LMForwardAPI.__init__] torch.cuda.device_count()={num_gpus}", flush=True)
-                for i in range(num_gpus):
-                    total_gb = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-                    alloc_gb = max(1, int(total_gb * util_frac - reserve_gb))
-                    # IMPORTANT: accelerate expects integer GPU ids as keys, not 'cuda:i'
-                    max_memory[i] = f"{alloc_gb}GiB"
-            max_memory['cpu'] = cpu_mem
-            print(f"[LMForwardAPI.__init__] max_memory={max_memory}", flush=True)
             self.model = AutoModelForCausalLM.from_pretrained(
                 HF_cache_dir,
                 low_cpu_mem_usage=True,
                 device_map="auto",
-                max_memory=max_memory,
-                _fast_init=False,
                 **kwargs,
             )
             print(f"[LMForwardAPI.__init__] Model loaded in {time.time()-_t0:.2f}s", flush=True)
-            try:
-                print(f"[LMForwardAPI.__init__] device_map={getattr(self.model, 'hf_device_map', None)}", flush=True)
-            except Exception:
-                pass
 
             print("[LMForwardAPI.__init__] Loading tokenizer.from_pretrained...", flush=True)
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -219,7 +187,7 @@ class LMForwardAPI:
         outputs = self.model.generate(
             inputs_embeds=input_embed,
             attention_mask=attn_mask,
-            max_new_tokens=64,
+            max_new_tokens=128,
             min_new_tokens=16,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
