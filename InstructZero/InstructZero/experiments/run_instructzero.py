@@ -55,7 +55,7 @@ class LMForwardAPI:
             self.tokenizer = AutoTokenizer.from_pretrained(
                                 HF_cache_dir,
                                 model_max_length=1024,
-                                padding_side="right",
+                                padding_side="left",
                                 use_fast=False,
                             )
             print("[LMForwardAPI.__init__] Tokenizer loaded", flush=True)
@@ -164,11 +164,7 @@ class LMForwardAPI:
                 f'[Prompt Embedding] Only support [list, numpy.ndarray], got `{type(prompt_embedding)}` instead.'
             )
         # create the input text with the system prompt  
-        # Encourage a clean single-sentence instruction (plain, non-chat template)
-        input_text = (
-            "Based on these examples, write a clear instruction for the task:\n\n"
-            f"{self.init_token}\n\nInstruction:"
-        )
+        input_text = f"{self.system_prompt} USER:{self.init_token} ASSISTANT:"
         print(f"[LMForwardAPI.eval] Input text: {input_text[:200]}...", flush=True)
         print('[LMForwardAPI.eval] Tokenizing input_text...', flush=True)
         input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
@@ -185,34 +181,26 @@ class LMForwardAPI:
         _tgen = time.time()
         # Build attention mask for inputs_embeds
         attn_mask = torch.ones(input_embed.shape[:2], dtype=torch.long, device=input_embed.device)
-        # Check if pad_token_id is set properly
+        # Ensure pad_token_id is defined
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        
+
+        # Note: when passing inputs_embeds, HF generate() typically returns only the
+        # newly generated token ids (without the prompt). Decode them directly.
         outputs = self.model.generate(
             inputs_embeds=input_embed,
             attention_mask=attn_mask,
-            max_new_tokens=32,
-            min_new_tokens=1,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
-            do_sample=False,
-            num_beams=1,
-            no_repeat_ngram_size=2,
-            repetition_penalty=1.1,
+            max_new_tokens=128,
         )
         print(f"[LMForwardAPI.eval] model.generate done in {time.time()-_tgen:.2f}s", flush=True)
-        # Decode only newly generated tokens (exclude prompt tokens)
-        init_len = input_embed.shape[1]
-        gen_tokens = outputs[:, init_len:]
-        print(f"[LMForwardAPI.eval] Generated token shape: {gen_tokens.shape}", flush=True)
-        print(f"[LMForwardAPI.eval] Generated token IDs: {gen_tokens[0][:20].tolist()}", flush=True)  # First 20 tokens
-        instruction = self.tokenizer.batch_decode(gen_tokens, skip_special_tokens=True)
+        print(f"[LMForwardAPI.eval] Generated sequences shape: {outputs.shape}", flush=True)
+        print(f"[LMForwardAPI.eval] First seq (first 20 ids): {outputs[0][:20].tolist() if outputs.shape[1] > 0 else []}", flush=True)
+        instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
         print(f"[LMForwardAPI.eval] Decoded instruction length={len(instruction[0]) if instruction else 0}", flush=True)
         print(f"[LMForwardAPI.eval] Raw decoded instruction: {instruction}", flush=True)
-        
-        # Debug: Try decoding without skipping special tokens
-        instruction_with_special = self.tokenizer.batch_decode(gen_tokens, skip_special_tokens=False)
+
+        # Debug: decode without skipping special tokens
+        instruction_with_special = self.tokenizer.batch_decode(outputs, skip_special_tokens=False)
         print(f"[LMForwardAPI.eval] Raw with special tokens: {instruction_with_special}", flush=True)
         # postprocess instruction: keep a clean single sentence with letters
         try:
