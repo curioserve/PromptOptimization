@@ -47,15 +47,18 @@ class LMForwardAPI:
                 HF_cache_dir,
                 low_cpu_mem_usage=True,
                 device_map="auto",
+                trust_remote_code=True,
                 **kwargs,
             )
             print(f"[LMForwardAPI.__init__] Model loaded in {time.time()-_t0:.2f}s", flush=True)
+            print(f"[LMForwardAPI.__init__] Model class: {self.model.__class__.__name__}", flush=True)
 
             print("[LMForwardAPI.__init__] Loading tokenizer.from_pretrained...", flush=True)
             self.tokenizer = AutoTokenizer.from_pretrained(
                                 HF_cache_dir,
                                 model_max_length=1024,
                                 padding_side="left",
+                                trust_remote_code=True,
                                 use_fast=False,
                             )
             print("[LMForwardAPI.__init__] Tokenizer loaded", flush=True)
@@ -66,12 +69,8 @@ class LMForwardAPI:
         if self.ops_model in ['wizardlm', 'vicuna', 'openchat', 'gpt-oss-20b']:
             print('[LMForwardAPI.__init__] Building input embeddings for init prompt...', flush=True)
             self.embedding = self.model.get_input_embeddings().weight.clone()
-            # Place token ids on the same device as the embedding to support CPU/offload setups
-            input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.to(self.embedding.device)
+            input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.cuda()
             self.init_prompt = self.embedding[input_ids]
-            # Stats for scaling soft prompt to embedding manifold
-            self.embed_mu = self.embedding.reshape(-1).mean().item()
-            self.embed_std = self.embedding.reshape(-1).std().item()
             
         ################# setup n_prompts_token #################
         self.n_prompt_tokens = n_prompt_tokens
@@ -98,16 +97,15 @@ class LMForwardAPI:
                 print('Get the embedding firstly to avoid issues', flush=True)
             else:
                 raise NotImplementedError
-            mu_hat = self.embed_mu
-            std_hat = self.embed_std
+            mu_hat = self.embedding.reshape(-1).mean().item()
+            std_hat = self.embedding.reshape(-1).std().item()
             mu = 0.0
             std = args.alpha * std_hat / (np.sqrt(intrinsic_dim) * args.sigma)
 
             print('[Embedding] mu: {} | std: {} [RandProj]  mu: {} | std: {}'.format(mu_hat, std_hat, mu, std), flush=True)
             torch.nn.init.normal_(self.linear.weight, -1, 1)
         elif random_proj == 'uniform':  
-            # Use a larger initialization range to ensure meaningful soft prompt signal
-            torch.nn.init.uniform_(self.linear.weight, -0.1, 0.1)
+            torch.nn.init.uniform_(self.linear.weight, -1, 1)
 
         ## eval preparation
         print('[LMForwardAPI.__init__] Updating config...', flush=True)
@@ -165,161 +163,23 @@ class LMForwardAPI:
                 f'[Prompt Embedding] Only support [list, numpy.ndarray], got `{type(prompt_embedding)}` instead.'
             )
         # create the input text with the system prompt  
-        if self.ops_model in ['vicuna', 'wizardlm', 'openchat']:
-            input_text = f"{self.system_prompt} USER:{self.init_token} ASSISTANT:"
-        else:
-            # gpt-oss-20b prefers a plain non-chat template
-            input_text = (
-                "Using the following input/output examples, write one concise English instruction describing the task. "
-                "Only output the instruction in a single sentence starting with an imperative verb.\n\n"
-                f"{self.init_token}\n\nInstruction:"
-            )
-        print(f"[LMForwardAPI.eval] Input text: {input_text[:200]}...", flush=True)
-        print('[LMForwardAPI.eval] Tokenizing input_text...', flush=True)
-        # Put token ids on the same device as the embedding to avoid CUDA device assumptions
-        enc_main = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)
-        input_ids = enc_main.input_ids.to(self.embedding.device)
-        # Prepend BOS if available
-        if getattr(self.tokenizer, 'bos_token_id', None) is not None:
-            bos = torch.tensor([[self.tokenizer.bos_token_id]], device=self.embedding.device)
-            input_ids = torch.cat([bos, input_ids], dim=1)
+        input_text = f"{self.system_prompt} USER:{self.init_token} ASSISTANT:"
+        input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
         input_embed = self.embedding[input_ids]
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
-        # Original behavior: directly prepend the learned soft prompt embeddings
         input_embed = torch.cat((prompt_embedding, input_embed), 1)
 
-        print('[LMForwardAPI.eval] Calling model.generate...', flush=True)
-        _tgen = time.time()
-        # Build attention mask for inputs_embeds
-        attn_mask = torch.ones(input_embed.shape[:2], dtype=torch.long, device=input_embed.device)
-        # Ensure pad_token_id is defined
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-
-        # Ensure pad_token_id is defined for decoder-only models
-        if self.tokenizer.pad_token_id is None and hasattr(self.tokenizer, 'eos_token_id'):
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        # Note: when passing inputs_embeds, HF generate returns only new tokens. Decode directly.
-        outputs = self.model.generate(
-            inputs_embeds=input_embed,
-            attention_mask=attn_mask,
-            max_new_tokens=128,
-            min_new_tokens=16,
-            do_sample=False,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
-        )
-        print(f"[LMForwardAPI.eval] model.generate done in {time.time()-_tgen:.2f}s", flush=True)
-        print(f"[LMForwardAPI.eval] Generated sequences shape: {outputs.shape}", flush=True)
-        print(f"[LMForwardAPI.eval] First seq (first 20 ids): {outputs[0][:20].tolist() if outputs.shape[1] > 0 else []}", flush=True)
+        outputs = self.model.generate(inputs_embeds=input_embed, max_new_tokens=128)
         instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        print(f"[LMForwardAPI.eval] Decoded instruction length={len(instruction[0]) if instruction else 0}", flush=True)
-        print(f"[LMForwardAPI.eval] Raw decoded instruction: {instruction}", flush=True)
 
-        # Debug: decode without skipping special tokens
-        instruction_with_special = self.tokenizer.batch_decode(outputs, skip_special_tokens=False)
-        print(f"[LMForwardAPI.eval] Raw with special tokens: {instruction_with_special}", flush=True)
-        # postprocess instruction: keep a clean single sentence with letters
-        try:
-            import re
-            raw = instruction[0]
-            # Remove non-printable chars
-            raw = re.sub(r"[^\x20-\x7E]", " ", raw)
-            # Take the first line/sentence with alphabets
-            candidates = re.split(r"[\n]+|(?<=[\.!?])\s+", raw)
-            candidates = [c.strip() for c in candidates if any(ch.isalpha() for ch in c)]
-            # Prefer a candidate that doesn't echo the header
-            header_phrases = ("below are input/output examples", "using the following input/output examples")
-            if candidates:
-                chosen = None
-                for c in candidates:
-                    lc = c.lower()
-                    if all(h not in lc for h in header_phrases) and len(c) >= 12:
-                        chosen = c
-                        break
-                if chosen is None:
-                    # Prefer the longest candidate rather than the first to avoid trivial outputs like 'a'
-                    cleaned = max(candidates, key=len)
-                else:
-                    cleaned = chosen
-                # Collapse repeated punctuation
-                cleaned = re.sub(r"[\.,;:!?\-]{2,}", lambda m: m.group(0)[0], cleaned)
-                # Trim leading/trailing punctuation
-                cleaned = re.sub(r"^[\W_]+|[\W_]+$", "", cleaned)
-                instruction[0] = cleaned
-        except Exception as e:
-            print(f"[LMForwardAPI.eval] postprocess error: {e}", flush=True)
-
-        # If the instruction is still non-linguistic (e.g., mostly punctuation), optionally fall back to text-only induction
-        disable_fb = os.getenv('INDUCTION_DISABLE_FALLBACK', '1') == '1'
-        if (not any(ch.isalpha() for ch in instruction[0]) or len(instruction[0]) < 10) and not disable_fb:
-            print('[LMForwardAPI.eval] Fallback to text-only induction (no soft prompt)', flush=True)
-            plain_text = (
-                "Using the following input/output examples, write one concise English instruction describing the task. "
-                "Only output the instruction in a single sentence starting with an imperative verb.\n\n"
-                f"{self.init_token}\n\nInstruction:"
-            )
-            enc = self.tokenizer(plain_text, return_tensors="pt", add_special_tokens=False)
-            input_ids = enc.input_ids.to(self.model.device)
-            # Prepend BOS if available
-            if getattr(self.tokenizer, 'bos_token_id', None) is not None:
-                bos = torch.tensor([[self.tokenizer.bos_token_id]], device=self.model.device)
-                input_ids = torch.cat([bos, input_ids], dim=1)
-            attn_mask = torch.ones_like(input_ids, device=self.model.device)
-            outputs2 = self.model.generate(
-                input_ids=input_ids,
-                attention_mask=attn_mask,
-                max_new_tokens=32,
-                min_new_tokens=16,
-                do_sample=False,
-                eos_token_id=self.tokenizer.eos_token_id,
-                pad_token_id=self.tokenizer.pad_token_id,
-                no_repeat_ngram_size=6,
-                repetition_penalty=1.1,
-            )
-            # Decode only newly generated tokens
-            input_len = input_ids.shape[1]
-            gen2 = outputs2[:, input_len:]
-            inst2 = self.tokenizer.batch_decode(gen2, skip_special_tokens=True)
-            # Clean again
-            try:
-                import re
-                raw2 = inst2[0]
-                raw2 = re.sub(r"[^\x20-\x7E]", " ", raw2)
-                cands = re.split(r"[\n]+|(?<=[\.!?])\s+", raw2)
-                cands = [c.strip() for c in cands if any(ch.isalpha() for ch in c)]
-                if cands:
-                    banned = ("input", "output", "examples", "instruction")
-                    chosen2 = None
-                    for c in cands:
-                        cl = c.lower()
-                        if all(b not in cl for b in banned) and len(c) >= 12:
-                            chosen2 = c
-                            break
-                    if chosen2 is None:
-                        cleaned2 = max(cands, key=len)
-                    else:
-                        cleaned2 = chosen2
-                    cleaned2 = re.sub(r"[\.,;:!\?\-]{2,}", lambda m: m.group(0)[0], cleaned2)
-                    cleaned2 = re.sub(r"^[\W_]+|[\W_]+$", "", cleaned2)
-                    instruction[0] = cleaned2
-            except Exception as e:
-                print(f"[LMForwardAPI.eval] text-only postprocess error: {e}", flush=True)
+        # postprocess instruction (unchanged from original)
         # instruction[0] = 'The instruction was to ' + instruction[0]
-        # import pdb; pdb.set_trace()
         # start = instruction[0].find('The instruction was to')
         # end = instruction[0].find('Comment:')
         # if end == -1:
         #     instruction[0] = instruction[0][start:]
         # else:
         #     instruction[0] = instruction[0][start: end]
-
-        # sentences = re.split(r' *[\.\?!][\'"\)\]]* *', instruction[0])
-        # search_string = 'The instruction was to'
-        # for sentence in sentences:
-        #     if sentence.startswith(search_string):
-        #         instruction[0] = sentence
-        #         break
 
         # print post-processed instruction
         print('Instruction: {}'.format(instruction), flush=True)
