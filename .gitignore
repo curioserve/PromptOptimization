@@ -4,3 +4,8 @@ venv/
 *.pyc
 gpt-oss-20b-BF16/
 .openrouter.env
+*.png
+*.txt
+*.csv
+create_distribution_charts.py
+math_instruction_comparison.py

@@ -189,64 +189,6 @@ class LMForwardAPI:
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         
-        # Try text-only generation first as fallback
-        print("[LMForwardAPI.eval] Attempting text-only generation as fallback...", flush=True)
-        text_input = f"{input_text} Solve math problems step by step."
-        text_tokens = self.tokenizer(text_input, return_tensors="pt").input_ids.to(self.model.device)
-        
-        try:
-            text_outputs = self.model.generate(
-                input_ids=text_tokens,
-                max_new_tokens=64,
-                min_new_tokens=5,
-                do_sample=True,
-                temperature=0.8,
-                top_p=0.9,
-                eos_token_id=self.tokenizer.eos_token_id,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-            text_gen_tokens = text_outputs[:, text_tokens.shape[1]:]
-            text_instruction = self.tokenizer.batch_decode(text_gen_tokens, skip_special_tokens=True)
-            print(f"[LMForwardAPI.eval] Text-only generation: {text_instruction}", flush=True)
-            
-            if text_instruction and len(text_instruction[0].strip()) > 0:
-                print("[LMForwardAPI.eval] Using text-only generation result", flush=True)
-                instruction = text_instruction
-                # Skip the soft prompt generation
-                print(f"[LMForwardAPI.eval] Final instruction: {instruction}", flush=True)
-                
-                if instruction[0] in self.prompts_set.keys():
-                    (dev_perf, instruction_score) = self.prompts_set[instruction[0]]
-                else:
-                    print(f"[LMForwardAPI.eval] Evaluating prompts via api_model={self.api_model}", flush=True)
-                    if self.api_model in ['chatgpt']:
-                        _tev = time.time()
-                        dev_perf, instruction_score = evaluate.evaluate_prompts(instruction, self.eval_template, self.eval_data, self.demos_template, self.few_shot_data, self.conf['evaluation']['method'], self.conf['evaluation'])
-                        print(f"[LMForwardAPI.eval] evaluate_prompts done in {time.time()-_tev:.2f}s", flush=True)
-                        dev_perf = dev_perf.sorted()[1][0]
-                        self.prompts_set[instruction[0]] = (dev_perf, instruction_score)
-                    else:
-                        raise NotImplementedError
-
-                if dev_perf >= self.best_last_perf:
-                    self.count += 1
-
-                if dev_perf >= self.best_dev_perf:
-                    self.best_dev_perf = dev_perf
-                    self.best_prompt = copy.deepcopy(tmp_prompt)
-                    self.best_instruction = instruction
-
-                print('Dev loss: {}. Dev perf: {}. Best dev perf: {}'.format(
-                    round(float(dev_perf), 4),
-                    round(float(dev_perf), 4),
-                    round(float(self.best_dev_perf), 4)))
-                print('********* Done *********', flush=True)
-
-                return dev_perf, instruction_score
-        except Exception as e:
-            print(f"[LMForwardAPI.eval] Text-only generation failed: {e}", flush=True)
-        
-        # Original soft prompt generation (keeping as backup)
         outputs = self.model.generate(
             inputs_embeds=input_embed,
             attention_mask=attn_mask,
