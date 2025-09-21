@@ -66,7 +66,8 @@ class LMForwardAPI:
         if self.ops_model in ['wizardlm', 'vicuna', 'openchat', 'gpt-oss-20b']:
             print('[LMForwardAPI.__init__] Building input embeddings for init prompt...', flush=True)
             self.embedding = self.model.get_input_embeddings().weight.clone()
-            input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.cuda()
+            # Place token ids on the same device as the embedding to support CPU/offload setups
+            input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.to(self.embedding.device)
             self.init_prompt = self.embedding[input_ids]
             # Stats for scaling soft prompt to embedding manifold
             self.embed_mu = self.embedding.reshape(-1).mean().item()
@@ -167,7 +168,8 @@ class LMForwardAPI:
         input_text = f"{self.system_prompt} USER:{self.init_token} ASSISTANT:"
         print(f"[LMForwardAPI.eval] Input text: {input_text[:200]}...", flush=True)
         print('[LMForwardAPI.eval] Tokenizing input_text...', flush=True)
-        input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
+        # Put token ids on the same device as the embedding to avoid CUDA device assumptions
+        input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.to(self.embedding.device)
         input_embed = self.embedding[input_ids]
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
         # Scale soft prompt to the embedding manifold and anchor to init prompt
