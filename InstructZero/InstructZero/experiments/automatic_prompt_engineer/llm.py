@@ -9,6 +9,7 @@ import openai
 import torch
 import asyncio
 from typing import Any
+from pathlib import Path
 
 
 gpt_costs_per_thousand = {
@@ -288,19 +289,49 @@ class GPT_Forward(LLM):
         self.config = config
         self.needs_confirmation = needs_confirmation
         self.disable_tqdm = disable_tqdm
+        # Attempt to load an .openrouter.env from common locations if environment is bare
+        def _load_env_file():
+            # Build a candidate list by walking up from both CWD and the file's path
+            candidates = set()
+            for base in [Path.cwd(), Path(__file__).resolve().parent]:
+                for p in [base] + list(base.parents):
+                    candidates.add(p / ".openrouter.env")
+            candidates.add(Path.home() / ".openrouter.env")
+            for p in candidates:
+                try:
+                    if p.is_file():
+                        for line in p.read_text().splitlines():
+                            if not line or line.strip().startswith('#') or '=' not in line:
+                                continue
+                            k, v = line.strip().split('=', 1)
+                            # Do not overwrite existing env
+                            if k and v and k not in os.environ:
+                                os.environ[k] = v
+                        print(f"[GPT_Forward.__init__] loaded env from {p}", flush=True)
+                        break
+                except Exception:
+                    pass
+
+        if not os.getenv("OPENAI_API_KEY") and not os.getenv("OPENROUTER_API_KEY"):
+            _load_env_file()
         # Configure OpenAI/OpenRouter settings from environment
         # OPENAI_API_KEY and OPENAI_API_BASE are respected by the openai SDK
         api_base = os.getenv("OPENAI_API_BASE")
         if api_base:
             openai.api_base = api_base
+        # If no API base is provided but an OpenRouter key is present, default to OpenRouter base
+        if not getattr(openai, 'api_base', None) and os.getenv("OPENROUTER_API_KEY") and not api_base:
+            openai.api_base = "https://openrouter.ai/api/v1"
+
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
             openai.api_key = api_key
-        # Fallback to OPENROUTER_API_KEY if OPENAI_API_KEY is not set
-        if not getattr(openai, 'api_key', None):
-            or_key = os.getenv("OPENROUTER_API_KEY")
-            if or_key:
-                openai.api_key = or_key
+        # If OPENAI_API_KEY is not set but OPENROUTER_API_KEY is present, force OpenRouter config
+        or_key = os.getenv("OPENROUTER_API_KEY")
+        if not getattr(openai, 'api_key', None) and or_key:
+            # Ensure we target OpenRouter endpoint explicitly
+            openai.api_base = os.getenv("OPENAI_API_BASE", "https://openrouter.ai/api/v1")
+            openai.api_key = or_key
         # Debug: print masked key info and base
         masked = None
         if getattr(openai, 'api_key', None):
