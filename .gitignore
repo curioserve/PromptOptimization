@@ -1,4 +1,4 @@
-gpt-oss-20b/
+#gpt-oss-20b/
 venv/
 **/__pycache__/
 *.pyc
@@ -7,6 +7,4 @@ gpt-oss-20b-BF16/
 *.png
 *.txt
 *.csv
-create_distribution_charts.py
-math_instruction_comparison.py
 tmp/
