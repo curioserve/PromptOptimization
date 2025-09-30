@@ -23,6 +23,10 @@ import requests
 from transformers import pipeline
 from datasets import load_dataset as hf_load_dataset
 from open_router_client import OpenRouterClient
+try:
+    import sympy as sp
+except Exception:
+    sp = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -181,9 +185,9 @@ class MATH500Evaluator:
                 {
                     "role": "system",
                     "content": (
-                        "You are a concise math solver. Do NOT include private chain-of-thought."
-                        " Provide a brief solution and put the final numeric/symbolic answer clearly in LaTeX \\boxed{...}."
-                        " Begin your reply with: 'Final Answer:' on the first line, followed by the result."
+                        "You are a math solver. Do NOT include private chain-of-thought."
+                        " Provide the final numeric/symbolic answer clearly in LaTeX \\boxed{...} as the first line, prefixed by 'Final Answer:'."
+                        " After that, provide a clear, concise, step-by-step solution in numbered points."
                     ),
                 },
                 {"role": "user", "content": problem},
@@ -243,16 +247,36 @@ class MATH500Evaluator:
         return result
     
     def extract_answer(self, generated_text: str) -> str:
-        """Extract the final answer from generated text."""
-        # Look for boxed answers first (LaTeX format)
-        boxed_pattern = r'\\boxed\{([^}]*)\}'
-        boxed_matches = re.findall(boxed_pattern, generated_text)
-        if boxed_matches:
-            return boxed_matches[-1].strip()
+        """Extract the final answer from generated text.
+        Handles LaTeX \boxed{...} with nested braces, parentheses forms, and common phrases.
+        """
+        text = generated_text or ""
+
+        # 1) Robustly extract the last \boxed{...} block with balanced braces
+        try:
+            for m in re.finditer(r"\\boxed\{", text):
+                start = m.end()
+                depth = 1
+                i = start
+                while i < len(text) and depth > 0:
+                    ch = text[i]
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                    i += 1
+                if depth == 0:
+                    candidate = text[start : i - 1].strip()
+                    last_boxed = candidate
+            if 'last_boxed' in locals() and last_boxed:
+                return last_boxed
+        except Exception:
+            pass
+
         
-        # Look for answers in parentheses
+        # 2) Look for answers in parentheses near the end of lines
         paren_pattern = r'\(([^)]*)\)(?=\s*$|\s*\.$)'
-        paren_matches = re.findall(paren_pattern, generated_text)
+        paren_matches = re.findall(paren_pattern, text)
         if paren_matches:
             return paren_matches[-1].strip()
         
@@ -264,18 +288,18 @@ class MATH500Evaluator:
         ]
         
         for pattern in answer_patterns:
-            matches = re.findall(pattern, generated_text)
+            matches = re.findall(pattern, text)
             if matches:
                 return matches[-1].strip()
         
         # Look for mathematical expressions at the end
         math_pattern = r'([0-9]+(?:\.[0-9]+)?|\$[^$]+\$|\\frac\{[^}]+\}\{[^}]+\}|\\sqrt\{[^}]+\})'
-        math_matches = re.findall(math_pattern, generated_text)
+        math_matches = re.findall(math_pattern, text)
         if math_matches:
             return math_matches[-1].strip()
         
         # Return last line as fallback
-        lines = generated_text.strip().split('\n')
+        lines = text.strip().split('\n')
         return lines[-1].strip() if lines else ""
     
     def check_correctness(self, predicted: str, ground_truth: str) -> bool:
@@ -283,10 +307,16 @@ class MATH500Evaluator:
         if not predicted or not ground_truth:
             return False
         
-        # First try simple string matching as a fast path
-        if predicted.strip().lower() == ground_truth.strip().lower():
+        # Normalize LaTeX wrappers and whitespace and try equality
+        pred_norm = self._normalize_math_string(predicted)
+        gt_norm = self._normalize_math_string(ground_truth)
+        if pred_norm == gt_norm:
             return True
         
+        # Try symbolic/numeric equivalence via Sympy if available
+        if self._symbolic_equivalence(predicted, ground_truth):
+            return True
+
         # Use LLM to compare mathematical equivalence
         return self._llm_compare_answers(predicted, ground_truth)
     
@@ -425,9 +455,9 @@ Answer:"""
     
     def _fallback_comparison(self, predicted: str, ground_truth: str) -> bool:
         """Fallback rule-based comparison when LLM comparison fails."""
-        # Simple normalization and comparison
-        pred_clean = re.sub(r'[^\w\d\.\-\+\(\)\[\]/\\]', '', predicted.lower())
-        gt_clean = re.sub(r'[^\w\d\.\-\+\(\)\[\]/\\]', '', ground_truth.lower())
+        # Normalize and compare after removing LaTeX wrappers/delimiters
+        pred_clean = self._normalize_math_string(predicted)
+        gt_clean = self._normalize_math_string(ground_truth)
         
         if pred_clean == gt_clean:
             return True
@@ -442,6 +472,91 @@ Answer:"""
         
         # Check containment
         return gt_clean in pred_clean or pred_clean in gt_clean
+
+    def _normalize_math_string(self, s: str) -> str:
+        """Normalize math strings across plain and LaTeX representations for comparison.
+        - Remove LaTeX wrappers like \left, \right, dollar signs
+        - Remove thin spaces (\,, \!, \;, \:)
+        - Collapse whitespace and lowercase
+        """
+        if not s:
+            return ""
+        out = s
+        # Remove LaTeX sizing wrappers
+        out = re.sub(r"\\left|\\right", "", out)
+        # Remove inline math delimiters
+        out = out.replace("$", "")
+        # Remove common spacing commands
+        out = re.sub(r"\\,|\\!|\\;|\\:", "", out)
+        # Remove surrounding parentheses spaces
+        out = re.sub(r"\s+", "", out)
+        # Lowercase for uniformity
+        out = out.lower()
+        return out
+
+    # --- Sympy-based comparison helpers ---
+    def _latex_to_sympy(self, s: str) -> str:
+        """Very light LaTeX -> sympy-friendly conversion for common patterns."""
+        if not s:
+            return ""
+        t = s
+        # strip $ and \left \right
+        t = t.replace("$", "")
+        t = re.sub(r"\\left|\\right", "", t)
+        # \pi -> pi
+        t = t.replace("\\pi", "pi")
+        # \sqrt{a} -> sqrt(a)
+        t = re.sub(r"\\sqrt\{([^}]+)\}", r"sqrt(\1)", t)
+        # \frac{a}{b} -> (a)/(b)
+        t = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1)/(\2)", t)
+        # \cdot -> *
+        t = t.replace("\\cdot", "*")
+        # Remove \boxed{...}
+        t = re.sub(r"\\boxed\{([^}]*)\}", r"\1", t)
+        # Remove spaces
+        t = t.strip()
+        return t
+
+    def _parse_math_value(self, s: str):
+        """Parse a math string into sympy expression(s) when possible.
+        Supports tuples like (a,b) by splitting top-level comma.
+        """
+        if sp is None or not s:
+            return None
+        t = self._latex_to_sympy(s)
+        # Try tuple-like
+        if t.startswith("(") and t.endswith(")"):
+            inner = t[1:-1]
+            parts = [p.strip() for p in inner.split(",")]
+            try:
+                exprs = [sp.sympify(p) for p in parts]
+                return tuple(exprs)
+            except Exception:
+                pass
+        try:
+            return sp.sympify(t)
+        except Exception:
+            return None
+
+    def _symbolic_equivalence(self, a: str, b: str) -> bool:
+        """Check symbolic/numeric equivalence using Sympy (if available)."""
+        if sp is None:
+            return False
+        a_parsed = self._parse_math_value(a)
+        b_parsed = self._parse_math_value(b)
+        if a_parsed is None or b_parsed is None:
+            return False
+        try:
+            # Tuple case: compare element-wise
+            if isinstance(a_parsed, tuple) and isinstance(b_parsed, tuple) and len(a_parsed) == len(b_parsed):
+                for x, y in zip(a_parsed, b_parsed):
+                    if not sp.simplify(x - y) == 0:
+                        return False
+                return True
+            # Scalar case
+            return sp.simplify(a_parsed - b_parsed) == 0
+        except Exception:
+            return False
     
     
     def evaluate_single_run(self, num_samples: Optional[int] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
