@@ -21,7 +21,8 @@ from typing import Dict, List, Optional, Any, Tuple
 from tqdm import tqdm
 import requests
 from transformers import pipeline
-from datasets import load_dataset
+from datasets import load_dataset as hf_load_dataset
+from open_router_client import OpenRouterClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -105,7 +106,7 @@ class MATH500Evaluator:
         
         try:
             # Load the MATH-500 dataset from HuggingFace
-            dataset = load_dataset("HuggingFaceH4/MATH-500", split="test")
+            dataset = hf_load_dataset("HuggingFaceH4/MATH-500", split="test")
             
             # Convert to list of dictionaries
             dataset_list = []
@@ -354,43 +355,27 @@ Answer:"""
         """Call OpenRouter Chat Completions API and return assistant content."""
         if not self.openrouter_api_key:
             raise RuntimeError("OPENROUTER_API_KEY not set.")
-        url = f"{self.openrouter_base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.openrouter_api_key}",
-            "Content-Type": "application/json",
-            # Optional routing headers (uncomment or customize if needed):
-            # "HTTP-Referer": "https://your-app.example",  # for ranking
-            # "X-Title": "MATH500 Evaluator",
-        }
-        payload: Dict[str, Any] = {
-            "model": self.model_id,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_new_tokens,
-        }
-        # Reasoning control (if any configured)
-        reasoning_cfg: Dict[str, Any] = {}
-        if self.reasoning_effort is not None:
-            reasoning_cfg["effort"] = self.reasoning_effort
-        if self.reasoning_max_tokens is not None:
-            reasoning_cfg["max_tokens"] = self.reasoning_max_tokens
-        if self.reasoning_exclude is not None:
-            reasoning_cfg["exclude"] = self.reasoning_exclude
-        if self.reasoning_enabled is not None:
-            reasoning_cfg["enabled"] = self.reasoning_enabled
-        if reasoning_cfg:
-            payload["reasoning"] = reasoning_cfg
+        # Lazy-init OpenRouter client
+        if not hasattr(self, "_openrouter_client") or self._openrouter_client is None:
+            self._openrouter_client = OpenRouterClient(
+                api_key=self.openrouter_api_key,
+                base_url=self.openrouter_base_url,
+                model_id=self.model_id,
+                reasoning_effort=self.reasoning_effort,
+                reasoning_max_tokens=self.reasoning_max_tokens,
+                reasoning_exclude=self.reasoning_exclude,
+                reasoning_enabled=self.reasoning_enabled,
+                save_reasoning_summary=self.save_reasoning_summary,
+            )
 
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        if resp.status_code != 200:
-            raise RuntimeError(f"OpenRouter API error {resp.status_code}: {resp.text}")
-        data = resp.json()
+        content, meta = self._openrouter_client.chat_completions(
+            messages=messages,
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+        )
         # Capture meta safely (no raw chain-of-thought persisted by default)
-        self._last_openrouter_meta = self._extract_reasoning_meta(data)
-        try:
-            return data["choices"][0]["message"]["content"]
-        except Exception:
-            return str(data)
+        self._last_openrouter_meta = meta
+        return content or ""
 
     def _extract_reasoning_meta(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract safe reasoning metadata from OpenRouter response without storing raw private reasoning text.
