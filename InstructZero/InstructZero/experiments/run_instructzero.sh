@@ -31,7 +31,7 @@ datasets=(informal_to_formal odd_one_out second_word_letter synonyms word_sortin
 
 
 python experiments/run_instructzero.py \
---task math500_highconf \
+--task math500_highconf_COT \
 --random_proj ${RANDOM_PROJ} \
 --n_prompt_tokens $SFT \
 --intrinsic_dim $INTRINSIC_DIM \
