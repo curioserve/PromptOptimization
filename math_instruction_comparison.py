@@ -15,7 +15,7 @@ from collections import Counter
 from openai import OpenAI
 
 # Load environment variables
-OPENROUTER_API_KEY = "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"
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 EVAL_API_MODEL = os.getenv('EVAL_API_MODEL', "openai/gpt-oss-20b")
 EVAL_BATCH_SIZE = int(os.getenv('EVAL_BATCH_SIZE', '10'))
 
