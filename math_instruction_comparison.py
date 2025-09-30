@@ -1,23 +1,34 @@
 #!/usr/bin/env python3
 """
 Script to compare math problem performance with and without instructions.
-Filters questions answered correctly 2, 3, or 4 times out of 5 runs,
-then tests them with instruction using OpenRouter GPT-OSS-20B.
+Loads questions from a CSV (no reliance on prior JSON/summary answers), then for
+each problem runs the model once without instruction and once with instruction
+using OpenRouter (via OpenAI SDK). Saves a results CSV and visualization.
 """
 
 import pandas as pd
 import os
 import time
+import json
 from typing import List, Dict, Tuple
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 from collections import Counter
 from openai import OpenAI
 
 # Load environment variables
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 EVAL_API_MODEL = os.getenv('EVAL_API_MODEL', "openai/gpt-oss-20b")
+# Default to a stronger judge model; can be overridden via env JUDGE_API_MODEL
+JUDGE_API_MODEL = os.getenv('JUDGE_API_MODEL', 'openai/gpt-4o-mini')
 EVAL_BATCH_SIZE = int(os.getenv('EVAL_BATCH_SIZE', '10'))
+# Number of runs per condition (without/with instruction). You requested a single run.
+RUNS_PER_CONDITION = int(os.getenv('RUNS_PER_CONDITION', '1'))
+JUDGE_BATCH_SIZE = int(os.getenv('JUDGE_BATCH_SIZE', '20'))
+EVAL_MAX_RETRIES = int(os.getenv('EVAL_MAX_RETRIES', '3'))
+JUDGE_MAX_RETRIES = int(os.getenv('JUDGE_MAX_RETRIES', '3'))
+RETRY_BACKOFF_SEC = float(os.getenv('RETRY_BACKOFF_SEC', '2.0'))
 
 # Initialize OpenAI client for OpenRouter
 client = OpenAI(
@@ -25,121 +36,358 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
 )
 
-# Instruction to be used
-INSTRUCTION = """produce final output? Actually the conversation: user gave a huge prompt with several seemingly 
-random text that appears to be a mixture of instructions, but final part is many sample 
-inputs/outputs. The instruction at the beginning: "Write a general-purpose program that can solve 
-any of these problems." Then "The assistant response should be a single line with your answer to the 
-following prompt:" Then the prompt is an input with vector v etc. We need produce a single line with 
-the answer. So it\'s the final prompt: "Input: There are an infinite number ... find the vector v 
-that has smallest magnitude. Output: ..." That is provided. So"""
+# Instruction to be used for the "with instruction" condition
+INSTRUCTION = (
+    "You are solving a math problem. Think step by step and output only the final answer on a single line."
+)
 
 def load_and_filter_data(csv_path: str) -> pd.DataFrame:
-    """Load CSV data and filter questions answered correctly 2, 3, or 4 times."""
-    print("Loading and filtering data...")
+    """Load CSV data and return questions only (no reliance on prior results).
+
+    Expected columns: at least `problem`. If `ground_truth` exists, it will be used
+    for correctness checks; otherwise, correctness will be recorded as False.
+    """
+    print("Loading questions...")
     df = pd.read_csv(csv_path)
-    
-    # Filter questions with correct_count in [2, 3, 4]
-    filtered_df = df[df['correct_count'].isin([0,1])].copy()
-    
-    print(f"Total questions: {len(df)}")
-    print(f"Questions answered correctly 2-4 times: {len(filtered_df)}")
-    print(f"Distribution of correct counts:")
-    print(filtered_df['correct_count'].value_counts().sort_index())
-    
-    return filtered_df
+    # Keep only relevant columns if present
+    keep_cols = [c for c in ['problem', 'ground_truth'] if c in df.columns]
+    if keep_cols:
+        df = df[keep_cols].copy()
+    else:
+        raise ValueError("Input CSV must contain at least a 'problem' column.")
+
+    # Drop rows with missing problems
+    df = df[df['problem'].astype(str).str.strip() != '']
+    df = df.drop_duplicates(subset=['problem']).reset_index(drop=True)
+
+    print(f"Total questions loaded: {len(df)}")
+    if 'ground_truth' not in df.columns:
+        print("Note: 'ground_truth' column not found. Correctness will be recorded as False.")
+    return df
 
 def test_api_connection() -> bool:
     """Test the OpenRouter API connection."""
     print("Testing API connection...")
     
+    for attempt in range(EVAL_MAX_RETRIES):
+        try:
+            completion = client.chat.completions.create(
+                model=EVAL_API_MODEL,
+                messages=[
+                    {"role": "system", "content": INSTRUCTION},
+                    {"role": "user", "content": "What is 2 + 2?"}
+                ],
+                max_tokens=50,
+                temperature=0.1
+            )
+            answer = completion.choices[0].message.content.strip()
+            print(f"API test successful. Response: {answer}")
+            return True
+        except Exception as e:
+            print(f"API test failed (attempt {attempt+1}/{EVAL_MAX_RETRIES}): {e}")
+            if attempt < EVAL_MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF_SEC * (2 ** attempt))
+            else:
+                return False
+
+def query_model_without_instruction(problem: str, ground_truth: str, run_number: int = 1) -> Tuple[str, bool]:
+    """Query the model without a special instruction and return response and correctness."""
+    for attempt in range(EVAL_MAX_RETRIES):
+        try:
+            completion = client.chat.completions.create(
+                model=EVAL_API_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": problem},
+                ],
+                max_tokens=1024,
+                temperature=0.1,
+            )
+            answer = completion.choices[0].message.content.strip()
+            if ground_truth:
+                is_correct = ground_truth.lower().strip() in answer.lower() or answer.lower().strip() in ground_truth.lower()
+            else:
+                is_correct = False
+            return answer, is_correct
+        except Exception as e:
+            print(f"API call (without instruction) failed (attempt {attempt+1}/{EVAL_MAX_RETRIES}): {e} (run {run_number})")
+            if attempt < EVAL_MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF_SEC * (2 ** attempt))
+            else:
+                return "", False
+
+def _build_judge_prompt(batch_items: List[Dict]) -> List[Dict[str, str]]:
+    """Builds chat messages for the LLM judge request.
+
+    batch_items: list of dicts with keys: id, ground_truth, pred_without, pred_with
+    """
+    system = {
+        "role": "system",
+        "content": (
+            "You are a strict math answer matcher. For each item, decide if the predicted answer matches the ground truth.\n"
+            "Rules:\n"
+            "- Be robust to trivial formatting (spaces, commas, braces).\n"
+            "- Treat equivalent numeric forms as equal (e.g., 0.5 == 1/2, 2e-1 == 0.2).\n"
+            "- If an expression simplifies to the same value, consider it a match.\n"
+            "- If answer includes an equality like 'x=5', match it to '5' when appropriate.\n"
+            "- For vectors/sets/tuples, ignore surrounding brackets and whitespace; order matters unless math requires otherwise.\n"
+            "- Use a tolerance of 1e-6 for floating-point comparisons.\n"
+            "- Do not infer new conditions not present in the answers.\n"
+            "Return ONLY a JSON array of objects with fields: {id, correct_without, correct_with}."
+        ),
+    }
+
+    user = {
+        "role": "user",
+        "content": json.dumps(
+            {
+                "items": [
+                    {
+                        "id": it["id"],
+                        "ground_truth": it.get("ground_truth", ""),
+                        "pred_without": it.get("pred_without", ""),
+                        "pred_with": it.get("pred_with", ""),
+                    }
+                    for it in batch_items
+                ],
+                "schema": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "correct_without": {"type": "boolean"},
+                            "correct_with": {"type": "boolean"},
+                        },
+                        "required": ["id", "correct_without", "correct_with"],
+                        "additionalProperties": False,
+                    },
+                },
+                "instruction": "Respond ONLY with the JSON array, no commentary.",
+            },
+            ensure_ascii=False,
+        ),
+    }
+    return [system, user]
+
+def _parse_judge_response_to_list(response_text: str) -> List[Dict]:
+    """Attempt to parse the model's response into a JSON array of dicts."""
+    text = response_text.strip()
+    # Try direct parse
     try:
-        completion = client.chat.completions.create(
-            model=EVAL_API_MODEL,
-            messages=[
-                {"role": "system", "content": INSTRUCTION},
-                {"role": "user", "content": "What is 2 + 2?"}
-            ],
-            max_tokens=50,
-            temperature=0.1
-        )
-        
-        answer = completion.choices[0].message.content.strip()
-        print(f"API test successful. Response: {answer}")
-        return True
-        
-    except Exception as e:
-        print(f"API test failed with exception: {e}")
-        return False
+        data = json.loads(text)
+        # Some models might wrap in an object; try to find array inside
+        if isinstance(data, dict):
+            # Look for first list value
+            for v in data.values():
+                if isinstance(v, list):
+                    return v
+            return []
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    # Fallback: extract the first JSON array substring
+    start = text.find('[')
+    end = text.rfind(']')
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start : end + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            return []
+    return []
+
+def judge_results_with_llm(results_df: pd.DataFrame) -> Tuple[pd.DataFrame, List[Dict]]:
+    """Use LLM to judge matches for each row's predictions vs ground truth in batches.
+
+    Returns the updated DataFrame and the list of judgment records (for JSONL audit).
+    """
+    if 'ground_truth' not in results_df.columns:
+        print("No 'ground_truth' column found; skipping LLM judging.")
+        return results_df, []
+
+    judgments: List[Dict] = []
+    updated = results_df.copy()
+
+    items = []
+    for i, row in updated.iterrows():
+        gt = str(row.get('ground_truth', '') or '').strip()
+        if not gt:
+            # If no ground truth, mark as False
+            judgments.append({
+                "id": int(i),
+                "correct_without": False,
+                "correct_with": False,
+                "reason": "No ground_truth provided",
+            })
+            continue
+        items.append({
+            "id": int(i),
+            "ground_truth": gt,
+            "pred_without": str(row.get('response_without_instruction', '') or '').strip(),
+            "pred_with": str(row.get('response_with_instruction', '') or '').strip(),
+        })
+
+    print(f"Using judge model: {JUDGE_API_MODEL}")
+
+    # Process in batches
+    for start_idx in range(0, len(items), JUDGE_BATCH_SIZE):
+        batch = items[start_idx : start_idx + JUDGE_BATCH_SIZE]
+        messages = _build_judge_prompt(batch)
+        parsed = []
+        for attempt in range(JUDGE_MAX_RETRIES):
+            try:
+                completion = client.chat.completions.create(
+                    model=JUDGE_API_MODEL,
+                    messages=messages,
+                    max_tokens=2048,
+                    temperature=0.0,
+                )
+                answer = completion.choices[0].message.content
+                parsed = _parse_judge_response_to_list(answer)
+                if not isinstance(parsed, list):
+                    parsed = []
+                break
+            except Exception as e:
+                print(f"Judge API call failed (attempt {attempt+1}/{JUDGE_MAX_RETRIES}): {e}")
+                if attempt < JUDGE_MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_SEC * (2 ** attempt))
+                else:
+                    print("Judge model failed after retries.")
+
+        # Fallback to eval model if judge failed and models differ
+        if not parsed and JUDGE_API_MODEL != EVAL_API_MODEL:
+            print(f"Falling back to eval model for judging: {EVAL_API_MODEL}")
+            for attempt in range(JUDGE_MAX_RETRIES):
+                try:
+                    completion = client.chat.completions.create(
+                        model=EVAL_API_MODEL,
+                        messages=messages,
+                        max_tokens=2048,
+                        temperature=0.0,
+                    )
+                    answer = completion.choices[0].message.content
+                    parsed = _parse_judge_response_to_list(answer)
+                    if not isinstance(parsed, list):
+                        parsed = []
+                    break
+                except Exception as e:
+                    print(f"Eval fallback judge failed (attempt {attempt+1}/{JUDGE_MAX_RETRIES}): {e}")
+                    if attempt < JUDGE_MAX_RETRIES - 1:
+                        time.sleep(RETRY_BACKOFF_SEC * (2 ** attempt))
+                    else:
+                        print("Using empty judgments for this batch.")
+
+        # Map results
+        by_id = {int(obj.get('id')): obj for obj in parsed if isinstance(obj, dict) and 'id' in obj}
+        for it in batch:
+            rid = it['id']
+            obj = by_id.get(rid)
+            if obj is None:
+                # Default to False if missing
+                judgments.append({
+                    "id": rid,
+                    "correct_without": False,
+                    "correct_with": False,
+                    "reason": "Missing from judge output",
+                })
+            else:
+                cw = bool(obj.get('correct_without', False))
+                cwi = bool(obj.get('correct_with', False))
+                judgments.append({
+                    "id": rid,
+                    "correct_without": cw,
+                    "correct_with": cwi,
+                })
+
+    # Apply judgments back to DataFrame
+    judge_map = {j['id']: j for j in judgments}
+    for i in updated.index:
+        j = judge_map.get(int(i))
+        if j:
+            updated.at[i, 'original_correct_count'] = int(bool(j.get('correct_without', False)))
+            updated.at[i, 'correct_count_with_instruction'] = int(bool(j.get('correct_with', False)))
+            updated.at[i, 'improvement'] = (
+                int(bool(j.get('correct_with', False))) - int(bool(j.get('correct_without', False)))
+            )
+
+    return updated, judgments
 
 def query_model_with_instruction(problem: str, ground_truth: str, run_number: int = 1) -> Tuple[str, bool]:
     """Query the model with instruction and return response and correctness."""
-    try:
-        completion = client.chat.completions.create(
-            model=EVAL_API_MODEL,
-            messages=[
-                {"role": "system", "content": INSTRUCTION},
-                {"role": "user", "content": problem}
-            ],
-            max_tokens=1024,
-            temperature=0.1
-        )
-        
-        answer = completion.choices[0].message.content.strip()
-        
-        # Simple correctness check - you might want to make this more sophisticated
-        is_correct = ground_truth.lower().strip() in answer.lower() or answer.lower().strip() in ground_truth.lower()
-        
-        return answer, is_correct
-        
-    except Exception as e:
-        print(f"API call failed with exception: {e} (run {run_number})")
-        return "", False
-
-def run_evaluation(filtered_df: pd.DataFrame) -> pd.DataFrame:
-    """Run evaluation on filtered questions with instruction - 5 times each."""
-    print(f"Running evaluation on {len(filtered_df)} questions (5 iterations each)...")
-    
-    results = []
-    
-    for idx, row in filtered_df.iterrows():
-        problem = row['problem']
-        ground_truth = str(row['ground_truth'])
-        original_correct_count = row['correct_count']
-        
-        print(f"Processing question {idx + 1}/{len(filtered_df)}")
-        
-        # Run each question 5 times with instruction
-        correct_count_with_instruction = 0
-        responses_with_instruction = []
-        
-        for run in range(1, 6):
-            print(f"  Run {run}/5")
-            response, is_correct = query_model_with_instruction(problem, ground_truth, run)
-            responses_with_instruction.append(response)
-            if is_correct:
-                correct_count_with_instruction += 1
+    for attempt in range(EVAL_MAX_RETRIES):
+        try:
+            completion = client.chat.completions.create(
+                model=EVAL_API_MODEL,
+                messages=[
+                    {"role": "system", "content": INSTRUCTION},
+                    {"role": "user", "content": problem}
+                ],
+                max_tokens=1024,
+                temperature=0.1
+            )
             
-            # Rate limiting between runs
-            time.sleep(1)
-        
+            answer = completion.choices[0].message.content.strip()
+            
+            # Simple correctness check - you might want to make this more sophisticated
+            if ground_truth:
+                is_correct = ground_truth.lower().strip() in answer.lower() or answer.lower().strip() in ground_truth.lower()
+            else:
+                is_correct = False
+            
+            return answer, is_correct
+        except Exception as e:
+            print(f"API call (with instruction) failed (attempt {attempt+1}/{EVAL_MAX_RETRIES}): {e} (run {run_number})")
+            if attempt < EVAL_MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF_SEC * (2 ** attempt))
+            else:
+                return "", False
+
+def run_evaluation(questions_df: pd.DataFrame) -> pd.DataFrame:
+    """Run evaluation on questions: once without instruction and once with instruction."""
+    print(f"Running single-pass evaluation on {len(questions_df)} questions (once per condition)...")
+
+    results = []
+
+    for idx, row in questions_df.iterrows():
+        problem = row['problem']
+        ground_truth = str(row.get('ground_truth', '') or '')
+
+        print(f"Processing question {idx + 1}/{len(questions_df)}")
+
+        # Without instruction
+        resp_without, correct_without = query_model_without_instruction(problem, ground_truth, 1)
+        time.sleep(0.5)
+
+        # With instruction
+        resp_with, correct_with = query_model_with_instruction(problem, ground_truth, 1)
+        time.sleep(0.5)
+
+        original_correct_count = int(bool(correct_without))  # 0 or 1
+        correct_count_with_instruction = int(bool(correct_with))  # 0 or 1
+
         results.append({
             'problem': problem,
             'ground_truth': ground_truth,
+            'response_without_instruction': resp_without,
+            'response_with_instruction': resp_with,
             'original_correct_count': original_correct_count,
             'correct_count_with_instruction': correct_count_with_instruction,
-            'responses_with_instruction': responses_with_instruction,
-            'improvement': correct_count_with_instruction - original_correct_count
+            'improvement': correct_count_with_instruction - original_correct_count,
         })
-        
-        print(f"  Original: {original_correct_count}/5, With instruction: {correct_count_with_instruction}/5")
-        
-        # Save intermediate results every 5 questions
-        if len(results) % 5 == 0:
+
+        print(
+            f"  Without instruction: {original_correct_count}/{RUNS_PER_CONDITION}, "
+            f"With instruction: {correct_count_with_instruction}/{RUNS_PER_CONDITION}"
+        )
+
+        # Save intermediate results every 20 questions
+        if len(results) % 20 == 0:
             temp_df = pd.DataFrame(results)
             temp_df.to_csv('temp_results.csv', index=False)
             print(f"Saved intermediate results: {len(results)} questions processed")
-    
+
     return pd.DataFrame(results)
 
 def analyze_results(results_df: pd.DataFrame) -> Dict:
@@ -165,7 +413,7 @@ def analyze_results(results_df: pd.DataFrame) -> Dict:
     analysis['avg_improvement'] = results_df['improvement'].mean()
     
     # Improvement by original performance level
-    for count in [2, 3, 4]:
+    for count in sorted(results_df['original_correct_count'].unique()):
         subset = results_df[results_df['original_correct_count'] == count]
         if len(subset) > 0:
             avg_improvement = subset['correct_count_with_instruction'].mean()
@@ -189,22 +437,22 @@ def create_visualization(results_df: pd.DataFrame, analysis: Dict):
     # 1. Distribution comparison - side by side bars
     original_dist = results_df['original_correct_count'].value_counts().sort_index()
     instruction_dist = results_df['correct_count_with_instruction'].value_counts().sort_index()
-    
-    # Ensure all counts 0-5 are represented
-    all_counts = range(0, 6)
+
+    # Ensure all counts 0..RUNS_PER_CONDITION are represented
+    all_counts = list(range(0, RUNS_PER_CONDITION + 1))
     orig_values = [original_dist.get(i, 0) for i in all_counts]
     inst_values = [instruction_dist.get(i, 0) for i in all_counts]
-    
+
     x = np.arange(len(all_counts))
     width = 0.35
-    
+
     ax1.bar(x - width/2, orig_values, width, label='Without Instruction', alpha=0.7, color='lightcoral')
     ax1.bar(x + width/2, inst_values, width, label='With Instruction', alpha=0.7, color='lightblue')
-    ax1.set_xlabel('Number of Correct Answers (out of 5)')
+    ax1.set_xlabel(f'Number of Correct Answers (out of {RUNS_PER_CONDITION})')
     ax1.set_ylabel('Number of Questions')
     ax1.set_title('Distribution Comparison: Questions by Correct Count')
     ax1.set_xticks(x)
-    ax1.set_xticklabels([f'{i}/5' for i in all_counts])
+    ax1.set_xticklabels([f'{i}/{RUNS_PER_CONDITION}' for i in all_counts])
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
@@ -224,9 +472,9 @@ def create_visualization(results_df: pd.DataFrame, analysis: Dict):
     colors = ['lightcoral', 'lightblue']
     
     bars = ax2.bar(categories, averages, color=colors, alpha=0.7)
-    ax2.set_ylabel('Average Correct Answers (out of 5)')
+    ax2.set_ylabel(f'Average Correct Answers (out of {RUNS_PER_CONDITION})')
     ax2.set_title('Average Performance Comparison')
-    ax2.set_ylim(0, 5)
+    ax2.set_ylim(0, RUNS_PER_CONDITION if RUNS_PER_CONDITION > 0 else 1)
     ax2.grid(True, alpha=0.3)
     
     # Add value labels
@@ -237,15 +485,15 @@ def create_visualization(results_df: pd.DataFrame, analysis: Dict):
     # 3. Improvement by original performance level
     improvement_by_level = []
     labels = []
-    for count in [2, 3, 4]:
+    for count in range(0, RUNS_PER_CONDITION + 1):
         subset = results_df[results_df['original_correct_count'] == count]
         if len(subset) > 0:
             avg_improvement = subset['improvement'].mean()
             improvement_by_level.append(avg_improvement)
-            labels.append(f'Originally {count}/5')
+            labels.append(f'Originally {count}/{RUNS_PER_CONDITION}')
         else:
             improvement_by_level.append(0)
-            labels.append(f'Originally {count}/5')
+            labels.append(f'Originally {count}/{RUNS_PER_CONDITION}')
     
     colors = ['lightcoral', 'lightgreen', 'lightblue']
     bars = ax3.bar(labels, improvement_by_level, color=colors, alpha=0.7)
@@ -291,28 +539,28 @@ def create_visualization(results_df: pd.DataFrame, analysis: Dict):
     print("SUMMARY STATISTICS")
     print("="*50)
     print(f"Total questions analyzed: {analysis['total_questions']}")
-    print(f"Average correct without instruction: {analysis['avg_original_correct']:.2f}/5")
-    print(f"Average correct with instruction: {analysis['avg_instruction_correct']:.2f}/5")
+    print(f"Average correct without instruction: {analysis['avg_original_correct']:.2f}/{RUNS_PER_CONDITION}")
+    print(f"Average correct with instruction: {analysis['avg_instruction_correct']:.2f}/{RUNS_PER_CONDITION}")
     print(f"Average improvement: {analysis['avg_improvement']:.2f}")
     print()
     
     print("Distribution without instruction:")
     for count, freq in analysis['original_distribution'].items():
-        print(f"  {count}/5 correct: {freq} questions")
+        print(f"  {count}/{RUNS_PER_CONDITION} correct: {freq} questions")
     
     print("\nDistribution with instruction:")
     for count, freq in analysis['instruction_distribution'].items():
-        print(f"  {count}/5 correct: {freq} questions")
+        print(f"  {count}/{RUNS_PER_CONDITION} correct: {freq} questions")
     
     print("\nImprovement by original performance:")
-    for count in [2, 3, 4]:
+    for count in range(0, RUNS_PER_CONDITION + 1):
         key = f'questions_originally_{count}_correct'
         if key in analysis:
             total = analysis[key]
             avg_perf = analysis[f'avg_performance_with_instruction_from_{count}']
             avg_imp = analysis[f'avg_improvement_from_{count}']
-            print(f"Questions originally {count}/5: {total} questions")
-            print(f"  - Average performance with instruction: {avg_perf:.2f}/5")
+            print(f"Questions originally {count}/{RUNS_PER_CONDITION}: {total} questions")
+            print(f"  - Average performance with instruction: {avg_perf:.2f}/{RUNS_PER_CONDITION}")
             print(f"  - Average improvement: {avg_imp:.2f}")
             print()
 
@@ -322,24 +570,33 @@ def main():
     print("=" * 50)
     
     # Load and filter data
-    csv_path = "/Users/ali/Documents/Hob/projects/PromptOptimization/Results/math500_20b_results_summary.csv"
-    filtered_df = load_and_filter_data(csv_path)
+    csv_path = "math500_20b_results_summary.csv"
+    questions_df = load_and_filter_data(csv_path)
     
     # Test API connection
     if not test_api_connection():
         print("API connection failed. Please check your credentials.")
         return
     
-    # For testing, let's start with a smaller sample
-    print(f"\nStarting with first 20 questions for testing...")
-    sample_df = filtered_df.head(10000).copy()
-    
     # Run evaluation
-    results_df = run_evaluation(sample_df)
+    results_df = run_evaluation(questions_df)
+
+    # Optional: Judge correctness using LLM (if ground_truth present)
+    judgments = []
+    if 'ground_truth' in results_df.columns and results_df['ground_truth'].fillna('').astype(str).str.strip().any():
+        print("\nJudging results with LLM for correctness...")
+        results_df, judgments = judge_results_with_llm(results_df)
+        # Save judgments JSONL audit
+        judgments_path = "math_instruction_judgments.jsonl"
+        with open(judgments_path, 'w', encoding='utf-8') as f:
+            for j in judgments:
+                f.write(json.dumps(j, ensure_ascii=False) + "\n")
+        print(f"Saved judgments audit to '{judgments_path}'")
     
     # Save results
-    results_df.to_csv('math_instruction_results.csv', index=False)
-    print("Results saved to 'math_instruction_results.csv'")
+    output_csv_path = "math_instruction_results.csv"
+    results_df.to_csv(output_csv_path, index=False)
+    print(f"Results saved to '{output_csv_path}'")
     
     # Analyze results
     analysis = analyze_results(results_df)
