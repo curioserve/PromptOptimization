@@ -39,8 +39,8 @@ class MATH500Evaluator:
         # Reasoning controls (OpenRouter-supported models)
         reasoning_effort: Optional[str] = None,  # "low" | "medium" | "high"
         reasoning_max_tokens: Optional[int] = None,
-        reasoning_exclude: Optional[bool] = None,
-        reasoning_enabled: Optional[bool] = None,
+        reasoning_exclude: Optional[bool] = True,
+        reasoning_enabled: Optional[bool] = False,
         save_reasoning_summary: bool = False,
     ):
         """Initialize the MATH500 evaluator.
@@ -181,8 +181,9 @@ class MATH500Evaluator:
                 {
                     "role": "system",
                     "content": (
-                        "You are a careful math tutor. Solve step-by-step and show your work."
-                        " Provide the final numeric/symbolic result clearly. If appropriate, put the final answer in LaTeX \\boxed{...}."
+                        "You are a concise math solver. Do NOT include private chain-of-thought."
+                        " Provide a brief solution and put the final numeric/symbolic answer clearly in LaTeX \\boxed{...}."
+                        " Begin your reply with: 'Final Answer:' on the first line, followed by the result."
                     ),
                 },
                 {"role": "user", "content": problem},
@@ -193,7 +194,7 @@ class MATH500Evaluator:
         start_time = time.time()
         try:
             # Generate response using selected backend
-            generated_text = self._generate_response(messages, max_new_tokens=self.max_new_tokens, temperature=1.0)
+            generated_text = self._generate_response(messages, max_new_tokens=self.max_new_tokens, temperature=0.2)
             
             inference_time = time.time() - start_time
             

@@ -112,6 +112,8 @@ class OpenRouterClient:
                             "finish_reason": choice0.get("finish_reason"),
                             "has_message": bool(choice0.get("message")),
                             "message_keys": list((choice0.get("message") or {}).keys()),
+                            "has_refusal": bool((choice0.get("message") or {}).get("refusal")),
+                            "content_type": type((choice0.get("message") or {}).get("content")).__name__,
                             "raw_choice_type": choice0.get("type"),
                         }
                     )
@@ -144,7 +146,25 @@ class OpenRouterClient:
 
     def _extract_content(self, data: Dict[str, Any]) -> str:
         try:
-            return data["choices"][0]["message"].get("content", "")
+            msg = (data.get("choices") or [{}])[0].get("message", {})
+            content = msg.get("content", "")
+            # If content is a list of parts, concatenate text parts
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        # Common keys across providers
+                        txt = part.get("text") or part.get("content") or ""
+                        if isinstance(txt, str) and txt:
+                            parts.append(txt)
+                content = "".join(parts)
+            if isinstance(content, str) and content.strip():
+                return content
+            # Fallbacks: some providers return 'refusal' text
+            refusal = msg.get("refusal")
+            if isinstance(refusal, str) and refusal.strip():
+                return refusal
+            return ""
         except Exception:
             return ""
 
