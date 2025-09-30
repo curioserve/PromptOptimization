@@ -3,13 +3,13 @@ import argparse, json, os
 from collections import defaultdict
 
 def main():
-    ap = argparse.ArgumentParser(description="Build InstructZero induce set from math500 results.")
+    ap = argparse.ArgumentParser(description="Build InstructZero induce and execute sets from MATH500 results.")
     ap.add_argument("--results_path", required=True,
-                    help="Path to math500_results_20b.json (large JSON with individual_runs).")
-    ap.add_argument("--out_task_name", default="math500_highconf",
-                    help="Task name to write under raw/induce/{task}.json")
+                    help="Path to results JSON (e.g., Results/math500_results_20b.json) containing individual_runs.")
+    ap.add_argument("--out_task_name", default="math500_highconf_COT",
+                    help="Base task name to write as raw/induce/{task}.json and raw/execute/{task}.json")
     ap.add_argument("--min_correct", type=int, default=4,
-                    help="Minimum number of correct answers (out of total runs) to keep a problem.")
+                    help="Threshold: induce includes problems with correct >= min_correct; execute includes the rest.")
     ap.add_argument("--repo_root", default=os.path.join(os.path.dirname(__file__),
                      "InstructZero", "InstructZero", "experiments"),
                     help="Path to InstructZero/InstructZero/experiments (auto-guess ok if running from repo root).")
@@ -32,40 +32,44 @@ def main():
             if r.get("is_correct", False):
                 stats[key]["count_correct"] += 1
 
-    # Filter by threshold
-    selected = [(p, gt, s["count_correct"], s["count_total"])
-                for (p, gt), s in stats.items()
-                if s["count_correct"] >= args.min_correct]
+    # Split by threshold
+    high_conf = [(p, gt, s["count_correct"], s["count_total"]) for (p, gt), s in stats.items() if s["count_correct"] >= args.min_correct]
+    low_conf  = [(p, gt, s["count_correct"], s["count_total"]) for (p, gt), s in stats.items() if s["count_correct"] <  args.min_correct]
 
-    selected.sort(key=lambda x: (-x[2], x[0][:64]))  # stable order: most-correct first
+    # Stable sorting for reproducibility
+    high_conf.sort(key=lambda x: (-x[2], x[0][:64]))
+    low_conf.sort(key=lambda x: (-x[2], x[0][:64]))
 
-    # Build InstructZero induce JSON format: {"metadata": {"num_examples": N}, "examples": {"1": {...}, ...}}
-    examples = {}
-    for i, (p, gt, c_ok, c_tot) in enumerate(selected, start=1):
-        examples[str(i)] = {
-            "input": p,
-            "output": gt,
-            # optional helpful metadata (ignored by loader)
-            "meta": {"correct_runs": c_ok, "total_runs": c_tot}
-        }
+    def to_iz_json(rows):
+        examples = {}
+        for i, (p, gt, c_ok, c_tot) in enumerate(rows, start=1):
+            examples[str(i)] = {
+                "input": p,
+                "output": gt,
+                "meta": {"correct_runs": c_ok, "total_runs": c_tot}
+            }
+        return {"metadata": {"num_examples": len(examples)}, "examples": examples}
 
-    out = {
-        "metadata": {"num_examples": len(examples)},
-        "examples": examples
-    }
+    induce_json = to_iz_json(high_conf)
+    execute_json = to_iz_json(low_conf)
 
-    out_dir = os.path.join(args.repo_root, "data", "instruction_induction", "raw", "induce")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{args.out_task_name}.json")
-    with open(out_path, "w") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
-    print(f"Wrote {len(examples)} examples to {out_path}")
+    # Write induce
+    induce_dir = os.path.join(args.repo_root, "data", "instruction_induction", "raw", "induce")
+    os.makedirs(induce_dir, exist_ok=True)
+    induce_path = os.path.join(induce_dir, f"{args.out_task_name}.json")
+    with open(induce_path, "w") as f:
+        json.dump(induce_json, f, ensure_ascii=False, indent=2)
 
-    # Next steps hint
-    print("\nNext steps:")
-    print(f"  1) Add '{args.out_task_name}' to TASKS in experiments/misc.py")
-    print("  2) Also create an execute set (raw/execute/{task}.json) or point eval to another dataset.")
-    print("     You can reuse this script to create a quick execute split using --exec-from-induce if desired.")
+    # Write execute
+    execute_dir = os.path.join(args.repo_root, "data", "instruction_induction", "raw", "execute")
+    os.makedirs(execute_dir, exist_ok=True)
+    execute_path = os.path.join(execute_dir, f"{args.out_task_name}.json")
+    with open(execute_path, "w") as f:
+        json.dump(execute_json, f, ensure_ascii=False, indent=2)
+
+    print("Done.")
+    print(f"  Induce:  {len(high_conf)} examples -> {induce_path}")
+    print(f"  Execute: {len(low_conf)} examples  -> {execute_path}")
 
 if __name__ == "__main__":
     main()

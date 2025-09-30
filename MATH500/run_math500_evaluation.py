@@ -18,6 +18,12 @@ def main():
     parser.add_argument("--subject", default=None, help="Filter by subject (e.g., Algebra, Geometry)")
     parser.add_argument("--provider", choices=["transformers", "openrouter"], default="transformers", help="Backend provider to use")
     parser.add_argument("--openrouter_api_key", default=None, help="OpenRouter API key (optional, otherwise use env OPENROUTER_API_KEY)")
+    # OpenRouter reasoning controls
+    parser.add_argument("--reasoning_effort", choices=["low", "medium", "high"], default=None, help="OpenRouter reasoning effort")
+    parser.add_argument("--reasoning_max_tokens", type=int, default=None, help="Max tokens for reasoning section (OpenRouter)")
+    parser.add_argument("--reasoning_enabled", choices=["true", "false"], default=None, help="Enable reasoning (OpenRouter)")
+    parser.add_argument("--reasoning_exclude", choices=["true", "false"], default=None, help="Exclude reasoning from response (OpenRouter)")
+    parser.add_argument("--save_reasoning_summary", action="store_true", help="Save high-level reasoning summaries if provided")
     
     args = parser.parse_args()
     
@@ -40,6 +46,11 @@ def main():
         subject_filter=args.subject,
         provider=args.provider,
         openrouter_api_key=args.openrouter_api_key,
+        reasoning_effort=args.reasoning_effort,
+        reasoning_max_tokens=args.reasoning_max_tokens,
+        reasoning_enabled=(args.reasoning_enabled.lower() == "true") if isinstance(args.reasoning_enabled, str) else None,
+        reasoning_exclude=(args.reasoning_exclude.lower() == "true") if isinstance(args.reasoning_exclude, str) else None,
+        save_reasoning_summary=args.save_reasoning_summary,
     )
     
     try:
