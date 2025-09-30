@@ -9,13 +9,15 @@ import logging
 
 def main():
     parser = argparse.ArgumentParser(description="Run MATH500 dataset evaluation")
-    parser.add_argument("--model", default="./gpt-oss-20b", help="Model ID to use")
+    parser.add_argument("--model", default="./gpt-oss-20b", help="Model ID to use. For OpenRouter, pass the OpenRouter model id (e.g., 'openai/gpt-4o-mini').")
     parser.add_argument("--samples", type=int, default=10, help="Number of samples to evaluate (None for all)")
     parser.add_argument("--runs", type=int, default=1, help="Number of evaluation runs to perform")
     parser.add_argument("--max_tokens", type=int, default=1024, help="Maximum new tokens to generate")
     parser.add_argument("--output", default="math500_results.json", help="Output file path")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--subject", default=None, help="Filter by subject (e.g., Algebra, Geometry)")
+    parser.add_argument("--provider", choices=["transformers", "openrouter"], default="transformers", help="Backend provider to use")
+    parser.add_argument("--openrouter_api_key", default=None, help="OpenRouter API key (optional, otherwise use env OPENROUTER_API_KEY)")
     
     args = parser.parse_args()
     
@@ -29,12 +31,15 @@ def main():
     print(f"  Max tokens: {args.max_tokens}")
     print(f"  Subject filter: {args.subject}")
     print(f"  Output: {args.output}")
+    print(f"  Provider: {args.provider}")
     
     # Initialize evaluator
     evaluator = MATH500Evaluator(
         model_id=args.model,
         max_new_tokens=args.max_tokens,
-        subject_filter=args.subject
+        subject_filter=args.subject,
+        provider=args.provider,
+        openrouter_api_key=args.openrouter_api_key,
     )
     
     try:

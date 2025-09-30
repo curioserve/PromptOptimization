@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-MATH500 Dataset Evaluator using GPT-OSS-20B model.
-Supports multiple evaluation runs with statistical analysis.
+MATH500 Dataset Evaluator.
+
+Supports two backends:
+- transformers pipeline (local/hosted Hugging Face models)
+- OpenRouter Chat Completions API (set OPENROUTER_API_KEY)
+
+Includes multiple evaluation runs with statistical analysis.
 """
 
 import json
@@ -15,7 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from tqdm import tqdm
 import requests
-from transformers import pipeline
+#from transformers import pipeline
 from datasets import load_dataset
 
 # Configure logging
@@ -23,40 +28,76 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class MATH500Evaluator:
-    def __init__(self, model_id: str = "./gpt-oss-20b", max_new_tokens: int = 1024, subject_filter: Optional[str] = None):
+    def __init__(
+        self,
+        model_id: str = "./gpt-oss-20b",
+        max_new_tokens: int = 1024,
+        subject_filter: Optional[str] = None,
+        provider: str = "transformers",
+        openrouter_api_key: Optional[str] = None,
+        # Reasoning controls (OpenRouter-supported models)
+        reasoning_effort: Optional[str] = None,  # "low" | "medium" | "high"
+        reasoning_max_tokens: Optional[int] = None,
+        reasoning_exclude: Optional[bool] = None,
+        reasoning_enabled: Optional[bool] = None,
+        save_reasoning_summary: bool = False,
+    ):
         """Initialize the MATH500 evaluator.
         
         Args:
-            model_id: Path to the model or model identifier
+            model_id: Path to the model or model identifier. For OpenRouter, pass the OpenRouter model id.
             max_new_tokens: Maximum number of tokens to generate
             subject_filter: Optional subject filter (e.g., 'Algebra', 'Geometry')
+            provider: 'transformers' or 'openrouter'
+            openrouter_api_key: If None, will read from environment variable OPENROUTER_API_KEY
         """
         self.model_id = model_id
         self.max_new_tokens = max_new_tokens
         self.subject_filter = subject_filter
+        self.provider = provider.lower()
         self.pipe = None
         self.all_runs_results = []
         self.experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.results_dir = Path("results") / f"math500_experiment_{self.experiment_id}"
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        # OpenRouter config
+        self.openrouter_api_key = openrouter_api_key or os.getenv("OPENROUTER_API_KEY")
+        self.openrouter_base_url = "https://openrouter.ai/api/v1"
+        # Reasoning config (only applied for provider == 'openrouter')
+        self.reasoning_effort = reasoning_effort
+        self.reasoning_max_tokens = reasoning_max_tokens
+        self.reasoning_exclude = reasoning_exclude
+        self.reasoning_enabled = reasoning_enabled
+        self.save_reasoning_summary = save_reasoning_summary
+        # Internal: last OpenRouter response meta for optional usage
+        self._last_openrouter_meta: Optional[Dict[str, Any]] = None
         logger.info(f"Results will be saved to: {self.results_dir}")
         
     def setup_pipeline(self):
-        """Initialize the model pipeline with harmony format support."""
-        logger.info(f"Loading model: {self.model_id}")
-        logger.info("Using transformers pipeline - harmony format applied automatically")
-        try:
-            self.pipe = pipeline(
-                "text-generation",
-                model=self.model_id,
-                torch_dtype="auto",
-                device_map="auto",
-                trust_remote_code=True
-            )
-            logger.info("Model pipeline loaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            raise
+        """Initialize the model backend."""
+        if self.provider == "transformers":
+            logger.info(f"Loading model (transformers): {self.model_id}")
+            logger.info("Using transformers pipeline - harmony format applied automatically")
+            try:
+                self.pipe = pipeline(
+                    "text-generation",
+                    model=self.model_id,
+                    torch_dtype="auto",
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+                logger.info("Model pipeline loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to load model: {e}")
+                raise
+        elif self.provider == "openrouter":
+            if not self.openrouter_api_key:
+                raise RuntimeError(
+                    "OPENROUTER_API_KEY not set. Provide via arg openrouter_api_key or env var OPENROUTER_API_KEY."
+                )
+            logger.info(f"Using OpenRouter backend with model: {self.model_id}")
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}")
     
     def load_dataset(self, num_samples: Optional[int] = None) -> List[Dict[str, Any]]:
         """Load MATH500 dataset from HuggingFace."""
@@ -134,34 +175,24 @@ class MATH500Evaluator:
         ground_truth = sample.get('answer', '')
         
         # Create messages for the model
-        messages = [{"role": "user", "content": problem}]
+        if self.provider == "openrouter":
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a careful math tutor. Solve step-by-step and show your work."
+                        " Provide the final numeric/symbolic result clearly. If appropriate, put the final answer in LaTeX \\boxed{...}."
+                    ),
+                },
+                {"role": "user", "content": problem},
+            ]
+        else:
+            messages = [{"role": "user", "content": problem}]
         
         start_time = time.time()
         try:
-            # Generate response using the pipeline
-            outputs = self.pipe(
-                messages,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=False,
-                temperature=1.0,
-                pad_token_id=self.pipe.tokenizer.eos_token_id
-            )
-            
-            # Extract generated text
-            generated_text = outputs[0]["generated_text"]
-            if isinstance(generated_text, list):
-                # Get the assistant's response
-                assistant_response = ""
-                for msg in generated_text:
-                    if msg.get("role") == "assistant":
-                        assistant_response = msg.get("content", "")
-                        break
-                generated_text = assistant_response
-            elif isinstance(generated_text, str):
-                # If it's already a string, use it directly
-                pass
-            else:
-                generated_text = str(generated_text)
+            # Generate response using selected backend
+            generated_text = self._generate_response(messages, max_new_tokens=self.max_new_tokens, temperature=1.0)
             
             inference_time = time.time() - start_time
             
@@ -171,7 +202,7 @@ class MATH500Evaluator:
             # Check correctness
             is_correct = self.check_correctness(predicted_answer, ground_truth)
             
-            result = {
+            result: Dict[str, Any] = {
                 'problem': problem,
                 'ground_truth': ground_truth,
                 'generated_text': generated_text,
@@ -182,6 +213,15 @@ class MATH500Evaluator:
                 'subject': sample.get('subject', ''),
                 'level': sample.get('level', 0)
             }
+
+            # Attach reasoning metadata from OpenRouter if available (no raw CoT text persisted)
+            if self.provider == "openrouter" and self._last_openrouter_meta:
+                result['reasoning_meta'] = self._last_openrouter_meta
+                if self.save_reasoning_summary:
+                    # Store only high-level summaries, if present
+                    summaries = self._last_openrouter_meta.get('summaries', [])
+                    if summaries:
+                        result['reasoning_summary'] = " \n".join(summaries)[:2000]
             
         except Exception as e:
             logger.error(f"Error during inference: {e}")
@@ -261,26 +301,14 @@ Ignore formatting differences like LaTeX vs plain text.
 
 Answer:"""
 
-            messages = [{"role": "user", "content": comparison_prompt}]
-            
-            outputs = self.pipe(
-                messages,
-                max_new_tokens=10,
-                do_sample=False,
-                temperature=0.0,
-                pad_token_id=self.pipe.tokenizer.eos_token_id
-            )
-            
-            # Extract response
-            response = ""
-            generated_text = outputs[0]["generated_text"]
-            if isinstance(generated_text, list):
-                for msg in generated_text:
-                    if msg.get("role") == "assistant":
-                        response = msg.get("content", "").strip().upper()
-                        break
+            if self.provider == "openrouter":
+                messages = [
+                    {"role": "system", "content": "Answer ONLY 'YES' or 'NO'."},
+                    {"role": "user", "content": comparison_prompt},
+                ]
             else:
-                response = str(generated_text).strip().upper()
+                messages = [{"role": "user", "content": comparison_prompt}]
+            response = self._generate_response(messages, max_new_tokens=10, temperature=0.0).strip().upper()
             
             # Look for YES/NO in the response
             if "YES" in response:
@@ -295,6 +323,119 @@ Answer:"""
         except Exception as e:
             logger.warning(f"LLM comparison failed: {e}. Using fallback.")
             return self._fallback_comparison(predicted, ground_truth)
+
+    def _generate_response(self, messages: List[Dict[str, str]], max_new_tokens: int, temperature: float) -> str:
+        """Generate a response using the configured backend and return assistant text."""
+        if self.provider == "transformers":
+            if self.pipe is None:
+                self.setup_pipeline()
+            outputs = self.pipe(
+                messages,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                temperature=temperature,
+                pad_token_id=self.pipe.tokenizer.eos_token_id,
+            )
+            generated_text = outputs[0]["generated_text"]
+            if isinstance(generated_text, list):
+                for msg in generated_text:
+                    if msg.get("role") == "assistant":
+                        return msg.get("content", "")
+                # Fallback if assistant not found
+                return str(generated_text)
+            return str(generated_text)
+        elif self.provider == "openrouter":
+            text = self._generate_with_openrouter(messages, max_new_tokens=max_new_tokens, temperature=temperature)
+            return text
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}")
+
+    def _generate_with_openrouter(self, messages: List[Dict[str, str]], max_new_tokens: int, temperature: float) -> str:
+        """Call OpenRouter Chat Completions API and return assistant content."""
+        if not self.openrouter_api_key:
+            raise RuntimeError("OPENROUTER_API_KEY not set.")
+        url = f"{self.openrouter_base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.openrouter_api_key}",
+            "Content-Type": "application/json",
+            # Optional routing headers (uncomment or customize if needed):
+            # "HTTP-Referer": "https://your-app.example",  # for ranking
+            # "X-Title": "MATH500 Evaluator",
+        }
+        payload: Dict[str, Any] = {
+            "model": self.model_id,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_new_tokens,
+        }
+        # Reasoning control (if any configured)
+        reasoning_cfg: Dict[str, Any] = {}
+        if self.reasoning_effort is not None:
+            reasoning_cfg["effort"] = self.reasoning_effort
+        if self.reasoning_max_tokens is not None:
+            reasoning_cfg["max_tokens"] = self.reasoning_max_tokens
+        if self.reasoning_exclude is not None:
+            reasoning_cfg["exclude"] = self.reasoning_exclude
+        if self.reasoning_enabled is not None:
+            reasoning_cfg["enabled"] = self.reasoning_enabled
+        if reasoning_cfg:
+            payload["reasoning"] = reasoning_cfg
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        if resp.status_code != 200:
+            raise RuntimeError(f"OpenRouter API error {resp.status_code}: {resp.text}")
+        data = resp.json()
+        # Capture meta safely (no raw chain-of-thought persisted by default)
+        self._last_openrouter_meta = self._extract_reasoning_meta(data)
+        try:
+            return data["choices"][0]["message"]["content"]
+        except Exception:
+            return str(data)
+
+    def _extract_reasoning_meta(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract safe reasoning metadata from OpenRouter response without storing raw private reasoning text.
+
+        Returns a dict like:
+        {
+          "reasoning_present": bool,
+          "counts": {"summary": n, "text": n, "encrypted": n},
+          "total_text_chars": int,
+          "summaries": [..]  # only populated if save_reasoning_summary is True and summaries exist
+          "usage": {...}  # if provided by API
+        }
+        """
+        meta: Dict[str, Any] = {
+            "reasoning_present": False,
+            "counts": {"summary": 0, "text": 0, "encrypted": 0},
+            "total_text_chars": 0,
+        }
+        try:
+            msg = data.get("choices", [{}])[0].get("message", {})
+            details = msg.get("reasoning_details") or []
+            if details:
+                meta["reasoning_present"] = True
+                summaries: List[str] = []
+                for d in details:
+                    t = d.get("type")
+                    if t == "reasoning.summary":
+                        meta["counts"]["summary"] += 1
+                        if self.save_reasoning_summary and isinstance(d.get("summary"), str):
+                            summaries.append(d.get("summary"))
+                    elif t == "reasoning.text":
+                        meta["counts"]["text"] += 1
+                        txt = d.get("text")
+                        if isinstance(txt, str):
+                            meta["total_text_chars"] += len(txt)
+                    elif t == "reasoning.encrypted":
+                        meta["counts"]["encrypted"] += 1
+                if self.save_reasoning_summary and summaries:
+                    meta["summaries"] = summaries
+        except Exception:
+            pass
+        # Usage (if provided)
+        if isinstance(data.get("usage"), dict):
+            meta["usage"] = data["usage"]
+        return meta
     
     def _fallback_comparison(self, predicted: str, ground_truth: str) -> bool:
         """Fallback rule-based comparison when LLM comparison fails."""

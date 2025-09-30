@@ -15,7 +15,7 @@ from collections import Counter
 from openai import OpenAI
 
 # Load environment variables
-OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', "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")
+OPENROUTER_API_KEY = "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"
 EVAL_API_MODEL = os.getenv('EVAL_API_MODEL', "openai/gpt-oss-20b")
 EVAL_BATCH_SIZE = int(os.getenv('EVAL_BATCH_SIZE', '10'))
 
@@ -26,10 +26,13 @@ client = OpenAI(
 )
 
 # Instruction to be used
-INSTRUCTION = """produce final output? Actually the conversation: user gave a huge prompt with several seemingly random text that appears to be a mixture of instructions, but final part is many sample inputs/outputs. Th
-e instruction at the beginning: "Write a general-purpose program that can solve any of these problems." Then "The assistant response should be a single line with your answer to the following prompt:" Then
-the prompt is an input with vector v etc. We need produce a single line with the answer. So it\'s the final prompt: "Input: There are an infinite number ... find the vector v that has smallest magnitude. O
-utput: ..." That is provided. So"""
+INSTRUCTION = """produce final output? Actually the conversation: user gave a huge prompt with several seemingly 
+random text that appears to be a mixture of instructions, but final part is many sample 
+inputs/outputs. The instruction at the beginning: "Write a general-purpose program that can solve 
+any of these problems." Then "The assistant response should be a single line with your answer to the 
+following prompt:" Then the prompt is an input with vector v etc. We need produce a single line with 
+the answer. So it\'s the final prompt: "Input: There are an infinite number ... find the vector v 
+that has smallest magnitude. Output: ..." That is provided. So"""
 
 def load_and_filter_data(csv_path: str) -> pd.DataFrame:
     """Load CSV data and filter questions answered correctly 2, 3, or 4 times."""
@@ -37,7 +40,7 @@ def load_and_filter_data(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     
     # Filter questions with correct_count in [2, 3, 4]
-    filtered_df = df[df['correct_count'].isin([2, 3, 4])].copy()
+    filtered_df = df[df['correct_count'].isin([0,1])].copy()
     
     print(f"Total questions: {len(df)}")
     print(f"Questions answered correctly 2-4 times: {len(filtered_df)}")
@@ -329,7 +332,7 @@ def main():
     
     # For testing, let's start with a smaller sample
     print(f"\nStarting with first 20 questions for testing...")
-    sample_df = filtered_df.head(20).copy()
+    sample_df = filtered_df.head(10000).copy()
     
     # Run evaluation
     results_df = run_evaluation(sample_df)
