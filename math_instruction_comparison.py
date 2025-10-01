@@ -30,40 +30,64 @@ EVAL_MAX_RETRIES = int(os.getenv('EVAL_MAX_RETRIES', '3'))
 JUDGE_MAX_RETRIES = int(os.getenv('JUDGE_MAX_RETRIES', '3'))
 RETRY_BACKOFF_SEC = float(os.getenv('RETRY_BACKOFF_SEC', '2.0'))
 
+# Filter questions by previous correct count - set to None to include all questions
+# Example: [0,1] = only questions answered correctly 0 or 1 times in previous runs
+# Example: [2,3,4] = only questions answered correctly 2, 3, or 4 times in previous runs
+FILTER_CORRECT_COUNTS = os.getenv('FILTER_CORRECT_COUNTS', '[0,1]')  # JSON array string or None
+
 # Initialize OpenAI client for OpenRouter
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
 )
-
 # Instruction to be used for the "with instruction" condition
 INSTRUCTION = (
     "You are solving a math problem. Think step by step and output only the final answer on a single line."
 )
 
-def load_and_filter_data(csv_path: str) -> pd.DataFrame:
-    """Load CSV data and return questions only (no reliance on prior results).
+def load_and_filter_data(input_path: str) -> pd.DataFrame:
+    """Load data from CSV or JSON/JSONL and return questions, optionally filtered by previous correct counts.
 
-    Expected columns: at least `problem`. If `ground_truth` exists, it will be used
-    for correctness checks; otherwise, correctness will be recorded as False.
+    Extraction rules:
+    - Problem key candidates: ['problem', 'question', 'prompt', 'input']
+    - Ground truth key candidates: ['ground_truth', 'final_answer', 'answer', 'target', 'expected', 'label']
+    - Correct count key candidates: ['correct_count', 'num_correct', 'score', 'correct_answers']
     """
     print("Loading questions...")
-    df = pd.read_csv(csv_path)
-    # Keep only relevant columns if present
-    keep_cols = [c for c in ['problem', 'ground_truth'] if c in df.columns]
-    if keep_cols:
-        df = df[keep_cols].copy()
-    else:
-        raise ValueError("Input CSV must contain at least a 'problem' column.")
+    _, ext = os.path.splitext(input_path)
+    ext = ext.lower()
 
-    # Drop rows with missing problems
-    df = df[df['problem'].astype(str).str.strip() != '']
-    df = df.drop_duplicates(subset=['problem']).reset_index(drop=True)
-
-    print(f"Total questions loaded: {len(df)}")
-    if 'ground_truth' not in df.columns:
-        print("Note: 'ground_truth' column not found. Correctness will be recorded as False.")
-    return df
+    def _extract_records_from_list(items: List[Dict]) -> pd.DataFrame:
+        probs, gts, correct_counts = [], [], []
+        for obj in items:
+            if not isinstance(obj, dict):
+                continue
+            problem = None
+            for k in ['problem', 'question', 'prompt', 'input']:
+                if k in obj and obj[k] is not None:
+                    problem = str(obj[k])
+                    break
+            gt = None
+            for k in ['ground_truth', 'final_answer', 'answer', 'target', 'expected', 'label']:
+                if k in obj and obj[k] is not None:
+                    gt = str(obj[k])
+                    break
+            # Extract previous correct count if available
+            correct_count = None
+            for k in ['correct_count', 'num_correct', 'score', 'correct_answers']:
+                if k in obj and obj[k] is not None:
+                    try:
+                        correct_count = int(obj[k])
+                        break
+                    except (ValueError, TypeError):
+                        continue
+            if problem:
+                probs.append(problem)
+                gts.append(gt if gt is not None else '')
+                correct_counts.append(correct_count if correct_count is not None else -1)
+        
+        df = pd.DataFrame({'problem': probs, 'ground_truth': gts, 'previous_correct_count': correct_counts})
+        return df
 
 def test_api_connection() -> bool:
     """Test the OpenRouter API connection."""
@@ -570,8 +594,8 @@ def main():
     print("=" * 50)
     
     # Load and filter data
-    csv_path = "math500_20b_results_summary.csv"
-    questions_df = load_and_filter_data(csv_path)
+    input_path = "/Users/ali/Documents/Hob/projects/PromptOptimization/Results/math500_results_20b.json"
+    questions_df = load_and_filter_data(input_path)
     
     # Test API connection
     if not test_api_connection():
@@ -587,14 +611,14 @@ def main():
         print("\nJudging results with LLM for correctness...")
         results_df, judgments = judge_results_with_llm(results_df)
         # Save judgments JSONL audit
-        judgments_path = "math_instruction_judgments.jsonl"
+        judgments_path = "/Users/ali/Documents/Hob/projects/PromptOptimization/math_instruction_judgments.jsonl"
         with open(judgments_path, 'w', encoding='utf-8') as f:
             for j in judgments:
                 f.write(json.dumps(j, ensure_ascii=False) + "\n")
         print(f"Saved judgments audit to '{judgments_path}'")
     
     # Save results
-    output_csv_path = "math_instruction_results.csv"
+    output_csv_path = "/Users/ali/Documents/Hob/projects/PromptOptimization/math_instruction_results.csv"
     results_df.to_csv(output_csv_path, index=False)
     print(f"Results saved to '{output_csv_path}'")
     
