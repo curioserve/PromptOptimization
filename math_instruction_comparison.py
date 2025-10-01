@@ -24,7 +24,7 @@ EVAL_API_MODEL = os.getenv('EVAL_API_MODEL', "openai/gpt-oss-20b")
 JUDGE_API_MODEL = os.getenv('JUDGE_API_MODEL', 'openai/gpt-4o-mini')
 EVAL_BATCH_SIZE = int(os.getenv('EVAL_BATCH_SIZE', '10'))
 # Number of runs per condition (without/with instruction). You requested a single run.
-RUNS_PER_CONDITION = int(os.getenv('RUNS_PER_CONDITION', '1'))
+RUNS_PER_CONDITION = int(os.getenv('RUNS_PER_CONDITION', '5'))
 JUDGE_BATCH_SIZE = int(os.getenv('JUDGE_BATCH_SIZE', '20'))
 EVAL_MAX_RETRIES = int(os.getenv('EVAL_MAX_RETRIES', '3'))
 JUDGE_MAX_RETRIES = int(os.getenv('JUDGE_MAX_RETRIES', '3'))
@@ -88,6 +88,133 @@ def load_and_filter_data(input_path: str) -> pd.DataFrame:
         
         df = pd.DataFrame({'problem': probs, 'ground_truth': gts, 'previous_correct_count': correct_counts})
         return df
+
+    # Read input file according to extension
+    if ext in ['.csv', '.tsv']:
+        sep = ',' if ext == '.csv' else '\t'
+        raw_df = pd.read_csv(input_path, sep=sep)
+        keep_cols = [c for c in ['problem', 'ground_truth', 'previous_correct_count'] if c in raw_df.columns]
+        if keep_cols:
+            df = raw_df[keep_cols].copy()
+            if 'previous_correct_count' not in df.columns:
+                # Try to map from common keys
+                mapped = _extract_records_from_list(raw_df.to_dict(orient='records'))
+                df['previous_correct_count'] = mapped.get('previous_correct_count', pd.Series([-1]*len(df)))
+        else:
+            df = _extract_records_from_list(raw_df.to_dict(orient='records'))
+    elif ext in ['.json', '.jsonl']:
+        # Robust JSON/JSONL loading
+        items: List[Dict] = []
+        with open(input_path, 'r', encoding='utf-8') as f:
+            if ext == '.jsonl':
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        items.append(json.loads(line))
+                    except Exception:
+                        continue
+            else:
+                text = f.read().strip()
+                try:
+                    data = json.loads(text)
+                except Exception as e:
+                    raise ValueError(f"Failed to parse JSON: {e}")
+
+                if isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict):
+                    # Recursively search for the best list of dicts containing problem-like keys
+                    problem_keys = {'problem', 'question', 'prompt', 'input'}
+                    gt_keys = {'ground_truth', 'final_answer', 'answer', 'target', 'expected', 'label'}
+
+                    def iter_lists(obj):
+                        if isinstance(obj, list):
+                            yield obj
+                            for v in obj:
+                                yield from iter_lists(v)
+                        elif isinstance(obj, dict):
+                            for v in obj.values():
+                                yield from iter_lists(v)
+
+                    def score_list(lst):
+                        if not isinstance(lst, list):
+                            return (-1, 0)
+                        count_items = 0
+                        with_problem = 0
+                        for el in lst:
+                            if isinstance(el, dict):
+                                count_items += 1
+                                if any(k in el for k in problem_keys):
+                                    with_problem += 1
+                                elif any(k in el for k in gt_keys):
+                                    # slight score for ground truth presence
+                                    with_problem += 0.5
+                        return (with_problem, count_items)
+
+                    best = None
+                    best_score = (-1, 0)
+                    for lst in iter_lists(data):
+                        sc = score_list(lst)
+                        if sc > best_score:
+                            best_score = sc
+                            best = lst
+
+                    if best is not None and isinstance(best, list):
+                        items = best
+                    else:
+                        # Fallback: top-level common containers or any list-valued field
+                        for key in ['results', 'data', 'items', 'records']:
+                            if key in data and isinstance(data[key], list):
+                                items = data[key]
+                                break
+                        else:
+                            list_values = [v for v in data.values() if isinstance(v, list)]
+                            items = max(list_values, key=lambda x: len(x)) if list_values else [data]
+                else:
+                    items = []
+        df = _extract_records_from_list(items)
+    else:
+        raise ValueError(f"Unsupported input extension: {ext}")
+
+    # Validate problem column
+    if 'problem' not in df.columns or df['problem'].isna().all():
+        raise ValueError("Input file must contain at least one of ['problem','question','prompt','input'].")
+
+    # Clean
+    df['problem'] = df['problem'].astype(str).str.strip()
+    if 'ground_truth' in df.columns:
+        df['ground_truth'] = df['ground_truth'].fillna('').astype(str).str.strip()
+    if 'previous_correct_count' not in df.columns:
+        df['previous_correct_count'] = -1
+    df = df[df['problem'] != '']
+    df = df.drop_duplicates(subset=['problem']).reset_index(drop=True)
+
+    print(f"Total questions loaded: {len(df)} from {input_path}")
+
+    # Optional filtering by previous correct counts
+    if FILTER_CORRECT_COUNTS and FILTER_CORRECT_COUNTS.strip().lower() not in ['none', 'null', '']:
+        try:
+            filter_counts = json.loads(FILTER_CORRECT_COUNTS)
+            if isinstance(filter_counts, list):
+                original_len = len(df)
+                df = df[df['previous_correct_count'].isin(filter_counts)].copy()
+                print(f"Filtered to {len(df)} questions with previous correct counts in {filter_counts} (from {original_len})")
+                if len(df) > 0:
+                    print("Distribution of filtered previous_correct_count:")
+                    print(df['previous_correct_count'].value_counts().sort_index())
+                else:
+                    print("Warning: No questions match the filter criteria.")
+            else:
+                print(f"Warning: FILTER_CORRECT_COUNTS is not a list: {FILTER_CORRECT_COUNTS}")
+        except (json.JSONDecodeError, TypeError) as e:
+            print(f"Warning: Invalid FILTER_CORRECT_COUNTS format ({FILTER_CORRECT_COUNTS}): {e}")
+
+    if 'ground_truth' not in df.columns or df['ground_truth'].replace('', pd.NA).isna().all():
+        print("Note: 'ground_truth' not available for many items. Correctness will default to False unless LLM judging is used.")
+
+    return df
 
 def test_api_connection() -> bool:
     """Test the OpenRouter API connection."""
@@ -594,7 +721,7 @@ def main():
     print("=" * 50)
     
     # Load and filter data
-    input_path = "/Users/ali/Documents/Hob/projects/PromptOptimization/Results/math500_results_20b.json"
+    input_path = "/Users/ali/Documents/Hob/projects/PromptOptimization/Results/math500_20b_results_summary.csv"
     questions_df = load_and_filter_data(input_path)
     
     # Test API connection
