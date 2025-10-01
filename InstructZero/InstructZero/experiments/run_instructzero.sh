@@ -6,7 +6,7 @@ RANDOM_PROJ='uniform'
 INTRINSIC_DIM=10
 # model_dir='lmsys/vicuna-13b-v1.3'
 # MODEL_NAME='vicuna'
-model_dir='/home/tavakoli/prompt_optmization/gpt-oss-20b'
+model_dir='/home/tavakoli/prompt_optmization/gpt-oss-20b-BF16'
 MODEL_NAME='gpt-oss-20b'
 # Prefer HF_HOME (TRANSFORMERS_CACHE is deprecated in v5)
 export HF_HOME=${HF_HOME:-/fs/nexus-scratch/bobchen}
