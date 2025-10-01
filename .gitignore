@@ -9,3 +9,4 @@ gpt-oss-20b-BF16/
 *.txt
 *.csv
 tmp/
+*.csv
