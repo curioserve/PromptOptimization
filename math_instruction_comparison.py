@@ -34,7 +34,7 @@ JUDGE_MAX_RETRIES = int(os.getenv('JUDGE_MAX_RETRIES', '3'))
 RETRY_BACKOFF_SEC = float(os.getenv('RETRY_BACKOFF_SEC', '2.0'))
 
 # Number of samples to use - set to None or 0 to use all questions
-NUM_SAMPLES = os.getenv('NUM_SAMPLES', '5')
+NUM_SAMPLES = os.getenv('NUM_SAMPLES', '0')
 if NUM_SAMPLES:
     try:
         NUM_SAMPLES = int(NUM_SAMPLES)
@@ -58,7 +58,7 @@ except Exception as e:
     client = None
 # Instruction to be used for the "with instruction" condition
 INSTRUCTION = (
-    "You are a math problem solver. For each problem, provide a concise step-by-step solution and then give the final answer on a new line starting with 'Answer:'."
+    "produce final output? Actually the conversation: user gave a huge prompt with several seemingly random text that appears to be a mixture of instructions, but final part is many sample inputs/outputs. The instruction at the beginning: "Write a general-purpose program that can solve any of these problems." Then "The assistant response should be a single line with your answer to the following prompt:" Then the prompt is an input with vector v etc. We need produce a single line with the answer. So it\'s the final prompt: "Input: There are an infinite number ... find the vector v that has smallest magnitude. Output: ..." That is provided. So"
 )
 
 def load_and_filter_data(input_path: str) -> pd.DataFrame:
