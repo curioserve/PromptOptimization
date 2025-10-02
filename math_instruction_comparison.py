@@ -19,16 +19,27 @@ from openai import OpenAI
 
 # Load environment variables
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+if not OPENROUTER_API_KEY:
+    print("Warning: OPENROUTER_API_KEY environment variable not set. API calls will fail.")
+    
 EVAL_API_MODEL = os.getenv('EVAL_API_MODEL', "openai/gpt-oss-20b")
 # Default to a stronger judge model; can be overridden via env JUDGE_API_MODEL
-JUDGE_API_MODEL = os.getenv('JUDGE_API_MODEL', 'openai/gpt-4o-mini')
+JUDGE_API_MODEL = os.getenv('JUDGE_API_MODEL', 'openai/gpt-oss-20b')
 EVAL_BATCH_SIZE = int(os.getenv('EVAL_BATCH_SIZE', '10'))
 # Number of runs per condition (without/with instruction). You requested a single run.
-RUNS_PER_CONDITION = int(os.getenv('RUNS_PER_CONDITION', '5'))
+RUNS_PER_CONDITION = int(os.getenv('RUNS_PER_CONDITION', '1'))
 JUDGE_BATCH_SIZE = int(os.getenv('JUDGE_BATCH_SIZE', '20'))
 EVAL_MAX_RETRIES = int(os.getenv('EVAL_MAX_RETRIES', '3'))
 JUDGE_MAX_RETRIES = int(os.getenv('JUDGE_MAX_RETRIES', '3'))
 RETRY_BACKOFF_SEC = float(os.getenv('RETRY_BACKOFF_SEC', '2.0'))
+
+# Number of samples to use - set to None or 0 to use all questions
+NUM_SAMPLES = os.getenv('NUM_SAMPLES', '5')
+if NUM_SAMPLES:
+    try:
+        NUM_SAMPLES = int(NUM_SAMPLES)
+    except (ValueError, TypeError):
+        NUM_SAMPLES = None
 
 # Filter questions by previous correct count - set to None to include all questions
 # Example: [0,1] = only questions answered correctly 0 or 1 times in previous runs
@@ -36,13 +47,18 @@ RETRY_BACKOFF_SEC = float(os.getenv('RETRY_BACKOFF_SEC', '2.0'))
 FILTER_CORRECT_COUNTS = os.getenv('FILTER_CORRECT_COUNTS', '[0,1]')  # JSON array string or None
 
 # Initialize OpenAI client for OpenRouter
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-)
+try:
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
+except Exception as e:
+    print(f"Warning: Failed to initialize OpenAI client: {e}")
+    print("API calls will fail unless OPENROUTER_API_KEY is set.")
+    client = None
 # Instruction to be used for the "with instruction" condition
 INSTRUCTION = (
-    "You are solving a math problem. Think step by step and output only the final answer on a single line."
+    "You are a math problem solver. For each problem, provide a concise step-by-step solution and then give the final answer on a new line starting with 'Answer:'."
 )
 
 def load_and_filter_data(input_path: str) -> pd.DataFrame:
@@ -214,12 +230,26 @@ def load_and_filter_data(input_path: str) -> pd.DataFrame:
     if 'ground_truth' not in df.columns or df['ground_truth'].replace('', pd.NA).isna().all():
         print("Note: 'ground_truth' not available for many items. Correctness will default to False unless LLM judging is used.")
 
+    # Sample data if NUM_SAMPLES is specified and valid
+    if NUM_SAMPLES and NUM_SAMPLES > 0:
+        if NUM_SAMPLES < len(df):
+            print(f"Sampling {NUM_SAMPLES} questions from {len(df)} total questions.")
+            df = df.sample(n=NUM_SAMPLES, random_state=42).reset_index(drop=True)
+        else:
+            print(f"NUM_SAMPLES ({NUM_SAMPLES}) is greater than or equal to total questions ({len(df)}). Using all questions.")
+    else:
+        print(f"Using all {len(df)} questions.")
+
     return df
 
 def test_api_connection() -> bool:
     """Test the OpenRouter API connection."""
     print("Testing API connection...")
     
+    if not client:
+        print("API client not initialized. Please set OPENROUTER_API_KEY environment variable.")
+        return False
+        
     for attempt in range(EVAL_MAX_RETRIES):
         try:
             completion = client.chat.completions.create(
@@ -242,24 +272,23 @@ def test_api_connection() -> bool:
                 return False
 
 def query_model_without_instruction(problem: str, ground_truth: str, run_number: int = 1) -> Tuple[str, bool]:
-    """Query the model without a special instruction and return response and correctness."""
+    """Query the model without a special instruction and return response."""
+    if not client:
+        print("API client not initialized. Please set OPENROUTER_API_KEY environment variable.")
+        return "", False
+        
     for attempt in range(EVAL_MAX_RETRIES):
         try:
             completion = client.chat.completions.create(
                 model=EVAL_API_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": problem},
                 ],
                 max_tokens=1024,
                 temperature=0.1,
             )
             answer = completion.choices[0].message.content.strip()
-            if ground_truth:
-                is_correct = ground_truth.lower().strip() in answer.lower() or answer.lower().strip() in ground_truth.lower()
-            else:
-                is_correct = False
-            return answer, is_correct
+            return answer, False  # Correctness will be determined by LLM judge
         except Exception as e:
             print(f"API call (without instruction) failed (attempt {attempt+1}/{EVAL_MAX_RETRIES}): {e} (run {run_number})")
             if attempt < EVAL_MAX_RETRIES - 1:
@@ -356,6 +385,10 @@ def judge_results_with_llm(results_df: pd.DataFrame) -> Tuple[pd.DataFrame, List
     """
     if 'ground_truth' not in results_df.columns:
         print("No 'ground_truth' column found; skipping LLM judging.")
+        return results_df, []
+
+    if not client:
+        print("API client not initialized. Please set OPENROUTER_API_KEY environment variable.")
         return results_df, []
 
     judgments: List[Dict] = []
@@ -466,7 +499,11 @@ def judge_results_with_llm(results_df: pd.DataFrame) -> Tuple[pd.DataFrame, List
     return updated, judgments
 
 def query_model_with_instruction(problem: str, ground_truth: str, run_number: int = 1) -> Tuple[str, bool]:
-    """Query the model with instruction and return response and correctness."""
+    """Query the model with instruction and return response."""
+    if not client:
+        print("API client not initialized. Please set OPENROUTER_API_KEY environment variable.")
+        return "", False
+        
     for attempt in range(EVAL_MAX_RETRIES):
         try:
             completion = client.chat.completions.create(
@@ -480,14 +517,7 @@ def query_model_with_instruction(problem: str, ground_truth: str, run_number: in
             )
             
             answer = completion.choices[0].message.content.strip()
-            
-            # Simple correctness check - you might want to make this more sophisticated
-            if ground_truth:
-                is_correct = ground_truth.lower().strip() in answer.lower() or answer.lower().strip() in ground_truth.lower()
-            else:
-                is_correct = False
-            
-            return answer, is_correct
+            return answer, False  # Correctness will be determined by LLM judge
         except Exception as e:
             print(f"API call (with instruction) failed (attempt {attempt+1}/{EVAL_MAX_RETRIES}): {e} (run {run_number})")
             if attempt < EVAL_MAX_RETRIES - 1:
@@ -497,6 +527,10 @@ def query_model_with_instruction(problem: str, ground_truth: str, run_number: in
 
 def run_evaluation(questions_df: pd.DataFrame) -> pd.DataFrame:
     """Run evaluation on questions: once without instruction and once with instruction."""
+    if not client:
+        print("API client not initialized. Please set OPENROUTER_API_KEY environment variable.")
+        return pd.DataFrame()
+        
     print(f"Running single-pass evaluation on {len(questions_df)} questions (once per condition)...")
 
     results = []
@@ -725,6 +759,10 @@ def main():
     questions_df = load_and_filter_data(input_path)
     
     # Test API connection
+    if not client:
+        print("API client not initialized. Please set OPENROUTER_API_KEY environment variable.")
+        return
+        
     if not test_api_connection():
         print("API connection failed. Please check your credentials.")
         return
