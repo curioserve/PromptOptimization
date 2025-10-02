@@ -62,6 +62,10 @@ def exec_accuracy_evaluator(prompts, eval_template, eval_data, demos_template, f
         score_fn = utility.get_multi_answer_contains
     elif metric == 'em':
         score_fn = utility.get_multi_answer_em
+    elif metric == 'math':
+        score_fn = utility.get_multi_answer_math
+    elif metric == 'llm_math':
+        score_fn = utility.get_multi_answer_llm_math
 
     scores = []
     for prediction, ans_ in zip(model_outputs, answers):
@@ -117,6 +121,10 @@ class exec_evaluator(object):
             score_fn = utility.get_multi_answer_contains
         elif metric == 'em':
             score_fn = utility.get_multi_answer_em
+        elif metric == 'math':
+            score_fn = utility.get_multi_answer_math
+        elif metric == 'llm_math':
+            score_fn = utility.get_multi_answer_llm_math
 
         scores = []
         for prediction, ans_ in zip(model_outputs, answers):
@@ -160,6 +168,10 @@ class exec_evaluator(object):
             score_fn = utility.get_multi_answer_contains
         elif metric == 'em':
             score_fn = utility.get_multi_answer_em
+        elif metric == 'math':
+            score_fn = utility.get_multi_answer_math
+        elif metric == 'llm_math':
+            score_fn = utility.get_multi_answer_llm_math
 
         scores = []
         for prediction, ans_ in zip(model_outputs, answers):

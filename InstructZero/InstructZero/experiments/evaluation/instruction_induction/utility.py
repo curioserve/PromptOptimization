@@ -9,7 +9,8 @@ from collections import Counter
 # TODO: add some more metrics here for the new tasks.
 
 TASK_TO_METRIC = {'common_concept': 'f1', 'informal_to_formal': 'f1', 'orthography_starts_with': 'es',
-                  'taxonomy_animal': 'es', 'synonyms': 'contains'}
+                  'taxonomy_animal': 'es', 'synonyms': 'contains', 
+                  'math500_highconf': 'llm_math', 'math500_highconf_COT': 'llm_math'}
 default_metric = 'em'
 
 
@@ -68,6 +69,7 @@ def get_contains_score(prediction, ground_truth):
         ground_truth, lowercase=True)
     if re.search(r'\b({0})\b'.format(ground_truth_normalized), prediction_normalized):
         return 1
+    return 0
 
 
 def get_multi_answer_em(prediction, answers):
@@ -91,8 +93,114 @@ def get_multi_answer_exact_set(prediction, answers):
     return 0
 
 
+def get_math_score(prediction, ground_truth):
+    """
+    Math-specific scoring that handles LaTeX expressions and extracts final answers.
+    Looks for the ground truth answer anywhere in the prediction text.
+    """
+    # Clean both strings by removing extra whitespace and normalizing
+    prediction_clean = re.sub(r'\s+', ' ', prediction.strip())
+    ground_truth_clean = re.sub(r'\s+', ' ', ground_truth.strip())
+    
+    # Direct substring match (case insensitive)
+    if ground_truth_clean.lower() in prediction_clean.lower():
+        return 1
+    
+    # Try without LaTeX formatting
+    def remove_latex(text):
+        # Remove common LaTeX commands but keep the content
+        text = re.sub(r'\\left\(', '(', text)
+        text = re.sub(r'\\right\)', ')', text)
+        text = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'\1/\2', text)
+        text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)  # Remove other LaTeX commands
+        text = re.sub(r'\\[a-zA-Z]+', '', text)  # Remove standalone LaTeX commands
+        return text.strip()
+    
+    pred_no_latex = remove_latex(prediction_clean)
+    gt_no_latex = remove_latex(ground_truth_clean)
+    
+    if gt_no_latex.lower() in pred_no_latex.lower():
+        return 1
+    
+    return 0
+
+
 def get_multi_answer_contains(prediction, answers):
     for answer in answers:
         if get_contains_score(prediction, answer) == 1:
+            return 1
+    return 0
+
+
+def get_multi_answer_math(prediction, answers):
+    """Multi-answer version of math scoring"""
+    for answer in answers:
+        if get_math_score(prediction, answer) == 1:
+            return 1
+    return 0
+
+
+def get_llm_math_score(prediction, ground_truth):
+    """
+    LLM-based evaluation for math problems.
+    Uses an LLM to compare the long prediction with the short ground truth.
+    """
+    try:
+        import openai
+        import os
+        
+        # Try to get API key from environment
+        api_key = os.getenv('OPENAI_API_KEY') or os.getenv('OPENROUTER_API_KEY')
+        if not api_key:
+            print("Warning: No API key found for LLM evaluation, falling back to string matching")
+            return get_math_score(prediction, ground_truth)
+        
+        # Use OpenRouter if available, otherwise OpenAI
+        if os.getenv('OPENROUTER_API_KEY'):
+            client = openai.OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=os.getenv('OPENROUTER_API_KEY')
+            )
+            model = "openai/gpt-4o-mini"  # Fast and cheap model for evaluation
+        else:
+            client = openai.OpenAI(api_key=api_key)
+            model = "gpt-4o-mini"
+        
+        prompt = f"""You are evaluating a math problem solution. 
+
+TASK: Determine if the student's response contains the correct final answer.
+
+EXPECTED ANSWER: {ground_truth}
+
+STUDENT RESPONSE: {prediction}
+
+INSTRUCTIONS:
+- Look for the final answer in the student's response
+- The answer might be embedded in longer reasoning
+- Handle different formats (LaTeX, plain text, fractions, decimals)
+- Consider mathematically equivalent answers as correct
+- Ignore minor formatting differences
+
+Respond with ONLY "1" if correct, "0" if incorrect."""
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=10,
+            temperature=0
+        )
+        
+        result = response.choices[0].message.content.strip()
+        return 1 if result == "1" else 0
+        
+    except Exception as e:
+        print(f"LLM evaluation failed: {e}, falling back to string matching")
+        return get_math_score(prediction, ground_truth)
+
+
+def get_multi_answer_llm_math(prediction, answers):
+    """Multi-answer version of LLM math scoring"""
+    for answer in answers:
+        if get_llm_math_score(prediction, answer) == 1:
             return 1
     return 0
