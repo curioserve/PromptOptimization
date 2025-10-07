@@ -145,28 +145,15 @@ def get_llm_math_score(prediction, ground_truth):
     LLM-based evaluation for math problems.
     Uses an LLM to compare the long prediction with the short ground truth.
     """
-    try:
-        import openai
-        import os
-        
-        # Try to get API key from environment
-        api_key = os.getenv('OPENAI_API_KEY') or os.getenv('OPENROUTER_API_KEY')
-        if not api_key:
-            print("Warning: No API key found for LLM evaluation, falling back to string matching")
-            return get_math_score(prediction, ground_truth)
-        
-        # Use OpenRouter if available, otherwise OpenAI
-        if os.getenv('OPENROUTER_API_KEY'):
-            client = openai.OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=os.getenv('OPENROUTER_API_KEY')
-            )
-            model = "openai/gpt-4o-mini"  # Fast and cheap model for evaluation
-        else:
-            client = openai.OpenAI(api_key=api_key)
-            model = "gpt-4o-mini"
-        
-        prompt = f"""You are evaluating a math problem solution. 
+    import openai
+    import os
+    
+    # Try to get API key from environment
+    api_key = os.getenv('OPENAI_API_KEY') or os.getenv('OPENROUTER_API_KEY')
+    if not api_key:
+        raise ValueError("No API key found. Set OPENAI_API_KEY or OPENROUTER_API_KEY environment variable.")
+    
+    prompt = f"""You are evaluating a math problem solution. 
 
 TASK: Determine if the student's response contains the correct final answer.
 
@@ -183,19 +170,24 @@ INSTRUCTIONS:
 
 Respond with ONLY "1" if correct, "0" if incorrect."""
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
-            temperature=0
-        )
-        
-        result = response.choices[0].message.content.strip()
-        return 1 if result == "1" else 0
-        
-    except Exception as e:
-        print(f"LLM evaluation failed: {e}, falling back to string matching")
-        return get_math_score(prediction, ground_truth)
+    # Using OpenAI API v0.27.x syntax
+    openai.api_key = api_key
+    
+    if os.getenv('OPENROUTER_API_KEY'):
+        openai.api_base = "https://openrouter.ai/api/v1"
+        model = "openai/gpt-4o-mini"
+    else:
+        model = "gpt-3.5-turbo"
+    
+    response = openai.ChatCompletion.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=10,
+        temperature=0
+    )
+    
+    result = response['choices'][0]['message']['content'].strip()
+    return 1 if result == "1" else 0
 
 
 def get_multi_answer_llm_math(prediction, answers):

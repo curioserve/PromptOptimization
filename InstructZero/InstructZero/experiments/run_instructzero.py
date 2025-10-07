@@ -2,6 +2,7 @@ import random
 import torch
 import numpy as np
 import copy
+import gc
 from automatic_prompt_engineer import ape, data
 from data.instruction_induction.load_data import load_data
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -32,6 +33,20 @@ from args import parse_args
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+# Memory optimization environment variables
+CPU_OFFLOAD = os.environ.get("INSTRUCTZERO_CPU_OFFLOAD", "false").lower() == "true"
+GRADIENT_CHECKPOINTING = os.environ.get("INSTRUCTZERO_GRADIENT_CHECKPOINTING", "true").lower() == "true"
+MAX_SEQ_LENGTH = int(os.environ.get("INSTRUCTZERO_MAX_SEQ_LENGTH", "512"))
+REDUCE_BATCH_SIZE = os.environ.get("INSTRUCTZERO_REDUCE_BATCH_SIZE", "false").lower() == "true"
+FORCE_FP16 = os.environ.get("INSTRUCTZERO_FORCE_FP16", "true").lower() == "true"
+CLEAR_CACHE_FREQ = int(os.environ.get("INSTRUCTZERO_CLEAR_CACHE_FREQ", "5"))
+LOW_CPU_MEM_USAGE = os.environ.get("INSTRUCTZERO_LOW_CPU_MEM_USAGE", "true").lower() == "true"
+
+print(f"[Memory Config] CPU_OFFLOAD={CPU_OFFLOAD}, GRADIENT_CHECKPOINTING={GRADIENT_CHECKPOINTING}")
+print(f"[Memory Config] MAX_SEQ_LENGTH={MAX_SEQ_LENGTH}, REDUCE_BATCH_SIZE={REDUCE_BATCH_SIZE}")
+print(f"[Memory Config] FORCE_FP16={FORCE_FP16}, CLEAR_CACHE_FREQ={CLEAR_CACHE_FREQ}")
+print(f"[Memory Config] LOW_CPU_MEM_USAGE={LOW_CPU_MEM_USAGE}")
+
     
 class LMForwardAPI:
     def __init__(self, model_name=None, eval_data=None, init_prompt=None, init_qa=None, conf=None, base_conf=None,
@@ -39,10 +54,20 @@ class LMForwardAPI:
                  HF_cache_dir=None, args=None):
         p = torch.ones(10)
         
-        kwargs={
-            'torch_dtype': torch.float16,
-            'use_cache': True
-            }
+        # Dynamic memory optimization kwargs
+        kwargs = {
+            'torch_dtype': torch.float16 if FORCE_FP16 else torch.float32,
+            'use_cache': not CPU_OFFLOAD,  # Disable cache if CPU offloading
+            'low_cpu_mem_usage': LOW_CPU_MEM_USAGE,
+        }
+        
+        # Add CPU offloading if enabled
+        if CPU_OFFLOAD:
+            kwargs['device_map'] = 'balanced'  # Better than 'auto' for memory
+            kwargs['offload_folder'] = '/tmp/instructzero_offload'
+            kwargs['offload_state_dict'] = True
+        else:
+            kwargs['device_map'] = 'auto'
         self.ops_model = model_name
         print(f"[LMForwardAPI.__init__] model_name={model_name}, HF_cache_dir={HF_cache_dir}", flush=True)
         # import pdb; pdb.set_trace()
@@ -51,22 +76,31 @@ class LMForwardAPI:
             _t0 = time.time()
             self.model = AutoModelForCausalLM.from_pretrained(
                 HF_cache_dir,
-                low_cpu_mem_usage=True,
-                device_map="auto",
                 trust_remote_code=True,
                 **kwargs,
             )
+            
+            # Enable gradient checkpointing if requested
+            if GRADIENT_CHECKPOINTING and hasattr(self.model, 'gradient_checkpointing_enable'):
+                print("[LMForwardAPI.__init__] Enabling gradient checkpointing for memory efficiency")
+                self.model.gradient_checkpointing_enable()
+            
+            # Set model to eval mode to save memory
+            self.model.eval()
             print(f"[LMForwardAPI.__init__] Model loaded in {time.time()-_t0:.2f}s", flush=True)
             print(f"[LMForwardAPI.__init__] Model class: {self.model.__class__.__name__}", flush=True)
 
             print("[LMForwardAPI.__init__] Loading tokenizer.from_pretrained...", flush=True)
             self.tokenizer = AutoTokenizer.from_pretrained(
                                 HF_cache_dir,
-                                model_max_length=1024,
+                                model_max_length=MAX_SEQ_LENGTH,
                                 padding_side="left",
                                 trust_remote_code=True,
                                 use_fast=False,
                             )
+            # Set pad token if not exists
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
             print("[LMForwardAPI.__init__] Tokenizer loaded", flush=True)
         else:
             raise NotImplementedError
@@ -75,8 +109,19 @@ class LMForwardAPI:
         if self.ops_model in ['wizardlm', 'vicuna', 'openchat', 'gpt-oss-20b']:
             print('[LMForwardAPI.__init__] Building input embeddings for init prompt...', flush=True)
             self.embedding = self.model.get_input_embeddings().weight.clone()
-            input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.cuda()
+            
+            # Handle device placement based on CPU offloading
+            input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids
+            if not CPU_OFFLOAD:
+                input_ids = input_ids.cuda()
+            
             self.init_prompt = self.embedding[input_ids]
+            
+            # Move embedding to CPU if offloading enabled
+            if CPU_OFFLOAD:
+                print("[LMForwardAPI.__init__] Moving embeddings to CPU for memory efficiency")
+                self.embedding = self.embedding.cpu()
+                self.init_prompt = self.init_prompt.cpu()
             
         ################# setup n_prompts_token #################
         self.n_prompt_tokens = n_prompt_tokens
@@ -138,11 +183,25 @@ class LMForwardAPI:
         self.num_call = 0
         self.best_instruction = None
         self.prompts_set = dict()
+        self.eval_count = 0  # Track evaluations for memory cleanup
         print('[LMForwardAPI.__init__] Initialization complete.', flush=True)
+        
+        # Initial memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
     def eval(self, prompt_embedding=None, test_data=None):
         print('[LMForwardAPI.eval] Enter', flush=True)
         self.num_call += 1
+        self.eval_count += 1
+        
+        # Periodic memory cleanup
+        if self.eval_count % CLEAR_CACHE_FREQ == 0:
+            print(f"[LMForwardAPI.eval] Performing memory cleanup (eval #{self.eval_count})")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         if prompt_embedding is None:
             prompt_embedding = self.best_prompt
         tmp_prompt = copy.deepcopy(prompt_embedding)  # list or numpy.ndarray
@@ -170,12 +229,52 @@ class LMForwardAPI:
             )
         # create the input text with the system prompt  
         input_text = f"{self.system_prompt} USER:{self.init_token} ASSISTANT:"
-        input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
-        input_embed = self.embedding[input_ids]
+        
+        # Tokenize with length limits
+        input_ids = self.tokenizer(
+            input_text, 
+            return_tensors="pt", 
+            max_length=MAX_SEQ_LENGTH//2,  # Reserve space for prompt embedding
+            truncation=True,
+            padding=False
+        ).input_ids
+        
+        # Handle device placement
+        if not CPU_OFFLOAD:
+            input_ids = input_ids.cuda()
+        
+        # Get embeddings with proper device handling
+        if CPU_OFFLOAD:
+            embedding_device = self.embedding.device
+            input_embed = self.embedding[input_ids].to(prompt_embedding.device)
+        else:
+            input_embed = self.embedding[input_ids]
+        
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
+        
+        # Concatenate embeddings
         input_embed = torch.cat((prompt_embedding, input_embed), 1)
-
-        outputs = self.model.generate(inputs_embeds=input_embed, max_new_tokens=128)
+        
+        # Check sequence length and truncate if necessary
+        if input_embed.shape[1] > MAX_SEQ_LENGTH:
+            print(f"[LMForwardAPI.eval] Truncating sequence from {input_embed.shape[1]} to {MAX_SEQ_LENGTH}")
+            input_embed = input_embed[:, :MAX_SEQ_LENGTH, :]
+        
+        # Generate with memory-efficient settings
+        generation_kwargs = {
+            'inputs_embeds': input_embed,
+            'max_new_tokens': 64 if REDUCE_BATCH_SIZE else 128,  # Reduce if memory constrained
+            'do_sample': False,  # Greedy decoding is more memory efficient
+            'pad_token_id': self.tokenizer.pad_token_id,
+        }
+        
+        # Add attention mask if available
+        if hasattr(self.tokenizer, 'pad_token_id') and self.tokenizer.pad_token_id is not None:
+            attention_mask = torch.ones(input_embed.shape[:2], device=input_embed.device)
+            generation_kwargs['attention_mask'] = attention_mask
+        
+        with torch.no_grad():  # Ensure no gradients are computed
+            outputs = self.model.generate(**generation_kwargs)
         instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
         # postprocess instruction (unchanged from original)
@@ -287,9 +386,27 @@ def run(args):
         
     # start bayesian opt
     print('[run] Drawing initial Sobol points...', flush=True)
-    X = SobolEngine(dimension=intrinsic_dim, scramble=True, seed=0).draw(N_INIT)
+    
+    # Reduce initial points if memory constrained
+    n_init = N_INIT // 2 if REDUCE_BATCH_SIZE else N_INIT
+    print(f'[run] Using {n_init} initial points (original: {N_INIT})', flush=True)
+    
+    X = SobolEngine(dimension=intrinsic_dim, scramble=True, seed=0).draw(n_init)
     print('[run] Evaluating initial points...', flush=True)
-    X_return = [model_forward_api.eval(x) for x in X]
+    
+    # Process evaluations one by one to save memory
+    X_return = []
+    for i, x in enumerate(X):
+        print(f'[run] Evaluating initial point {i+1}/{len(X)}', flush=True)
+        result = model_forward_api.eval(x)
+        X_return.append(result)
+        
+        # Periodic cleanup during initial evaluation
+        if (i + 1) % 3 == 0:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+    
     Y = [X[0] for X in X_return]
     Y_scores = [X[1].squeeze() for X in X_return]
     
@@ -318,20 +435,31 @@ def run(args):
     gp_model = SingleTaskGP(X_train, y_train, covar_module=covar_module)
     gp_mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
     
-    for i in range(N_ITERATIONS):
+    # Reduce iterations if memory constrained
+    n_iterations = N_ITERATIONS // 2 if REDUCE_BATCH_SIZE else N_ITERATIONS
+    print(f'[run] Using {n_iterations} iterations (original: {N_ITERATIONS})', flush=True)
+    
+    for i in range(n_iterations):
         print(f"[run][iter {i}] X_train shape {X_train.shape}", flush=True)
         print(f"[run][iter {i}] y_train shape {y_train.shape}", flush=True)
+        
+        # Memory cleanup at start of each iteration
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
         start_time = time.time()
 
         print(f"[run][iter {i}] Fitting GP MLL...", flush=True)
-        fit_gpytorch_mll(gp_mll)#, options = {'maxiter':10})
+        fit_gpytorch_model(gp_mll)#, options = {'maxiter':10})
         print(f"[run][iter {i}] Fitting done in {time.time()-start_time}", flush=True)
         start_time = time.time()
         EI = ExpectedImprovement(gp_model, best_f = y_train.max().item())
         print(f"[run][iter {i}] EI prepared", flush=True)
         
-        starting_idxs = torch.argsort(-1*y_train.squeeze())[:BATCH_SIZE]
+        # Reduce batch size if memory constrained
+        batch_size = max(1, BATCH_SIZE // 2) if REDUCE_BATCH_SIZE else BATCH_SIZE
+        starting_idxs = torch.argsort(-1*y_train.squeeze())[:batch_size]
         starting_points = X_train[starting_idxs]
 
 
@@ -346,11 +474,16 @@ def run(args):
             
         print(f"[run][iter {i}] best point {best_points[np.argmax(best_vals)]} \n with EI value {np.max(best_vals)}", flush=True)
         print(f"[run][iter {i}] Time for CMA-ES {time.time() - start_time}", flush=True)
+        # Process candidates sequentially to save memory
         for idx in np.argsort(-1*np.array(best_vals)):
             X_next_point =  torch.from_numpy(best_points[idx]).float().unsqueeze(0)
-            # Y_next_point = [model_forward_api.eval(X_next_point)]
             
             print(f"[run][iter {i}] Evaluating candidate idx={idx}", flush=True)
+            
+            # Memory cleanup before evaluation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             X_next_points_return = [model_forward_api.eval(X_next_point)]
             Y_next_point = [X[0] for X in X_next_points_return]
             Y_scores_next_points = [X[1].squeeze() for X in X_next_points_return]
@@ -362,6 +495,11 @@ def run(args):
             X = torch.cat([X, X_next_point])
             Y = torch.cat([Y, Y_next_point])
             Y_scores = torch.cat([Y_scores, Y_scores_next_points])
+            
+            # Clean up intermediate variables
+            del X_next_points_return, Y_next_point, Y_scores_next_points
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # standardization Y
         X_train = X.clone()
@@ -381,6 +519,11 @@ def run(args):
         gp_model = SingleTaskGP(X_train, y_train, covar_module=covar_module)
         gp_mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
         print(f"[run][iter {i}] Best value found till now: {torch.max(Y)}", flush=True)
+        
+        # Memory cleanup at end of iteration
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
     print('Evaluate on test data...', flush=True)
     prompts = model_forward_api.return_best_prompt()
