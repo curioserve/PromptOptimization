@@ -120,5 +120,75 @@ def parse_args():
         default='nf4',
         help="bitsandbytes 4-bit quant type: nf4 or fp4"
     )
+    parser.add_argument(
+        "--selection",
+        type=str,
+        default='bo',
+        choices=['bo', 'bai'],
+        help="Search controller: 'bo' (Bayesian optimization) or 'bai' (fixed-budget BAI).",
+    )
+    parser.add_argument(
+        "--bai_method",
+        type=str,
+        default='sh',
+        choices=['sh', 'cr', 'clst', 'gse'],
+        help="BAI strategy when --selection=bai: sequential halving (sh), continuous reject (cr), cluster BAI (clst), or global surrogate elimination (gse).",
+    )
+    parser.add_argument(
+        "--bai_total_budget",
+        type=int,
+        default=80,
+        help="Total number of evaluation calls allocated to the BAI selector.",
+    )
+    parser.add_argument(
+        "--bai_batch_size",
+        type=int,
+        default=4,
+        help="Number of pulls per active arm during a BAI sweep.",
+    )
+    parser.add_argument(
+        "--bai_delta",
+        type=float,
+        default=0.1,
+        help="Confidence level used by continuous reject to prune arms.",
+    )
+    parser.add_argument(
+        "--bai_seed_evals",
+        type=int,
+        default=24,
+        help="Number of Sobol seed evaluations run before the main BAI loop.",
+    )
+    parser.add_argument(
+        "--bai_num_arms",
+        type=int,
+        default=64,
+        help="Number of randomly initialised soft prompts evaluated by the BAI selector.",
+    )
+    parser.add_argument(
+        "--bai_arm_builder",
+        type=str,
+        default='random',
+        choices=['random', 'instruction_first', 'trust_region', 'lhs'],
+        help="Method to build candidate arms: random (current), instruction_first, trust_region, or lhs.",
+    )
+    parser.add_argument(
+        "--bai_embedding_model",
+        type=str,
+        default=None,
+        help="Embedding model for CLST/GSE methods (e.g., 'sentence-transformers/all-MiniLM-L6-v2').",
+    )
+    parser.add_argument(
+        "--bai_num_clusters",
+        type=int,
+        default=8,
+        help="Number of clusters for CLST method.",
+    )
+    parser.add_argument(
+        "--bai_surrogate_model",
+        type=str,
+        default='linear',
+        choices=['linear', 'rf'],
+        help="Surrogate model for GSE method: linear regression or random forest.",
+    )
     args = parser.parse_args()
     return args

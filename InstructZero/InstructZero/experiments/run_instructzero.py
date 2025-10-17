@@ -34,6 +34,8 @@ from gpytorch.kernels import ScaleKernel, MaternKernel
 from gpytorch.priors import GammaPrior
 from instruction_coupled_kernel import *
 import time
+from bai import ArmState, sequential_halving, continuous_reject, cluster_bai_in_cluster, global_surrogate_elimination
+
 
 from misc import set_all_seed, TASKS, tkwargs, N_INIT, BATCH_SIZE, N_ITERATIONS
 
@@ -426,7 +428,207 @@ class LMForwardAPI:
 
     def return_prompts_set(self):
         return self.prompts_set
+
+
+def _ensure_cpu_latent(latent):
+    if isinstance(latent, torch.Tensor):
+        return latent.detach().cpu().to(torch.float32)
+    return torch.tensor(latent, dtype=torch.float32)
+
+
+def _latent_key(latent):
+    return tuple(round(float(v), 6) for v in latent.tolist())
+
+
+def _build_bai_candidates(args, model_forward_api, intrinsic_dim):
+    """Create a pool of soft prompts for BAI selection using specified arm builder."""
+
+    generator = torch.Generator().manual_seed(args.seed)
+    num_arms = max(1, int(args.bai_num_arms))
+
+    arm_map = {}
     
+    if args.bai_arm_builder == 'random':
+        # Original random sampling
+        while len(arm_map) < num_arms:
+            remaining = num_arms - len(arm_map)
+            samples = torch.rand((remaining, intrinsic_dim), generator=generator)
+            for sample in samples:
+                latent = _ensure_cpu_latent(sample * 2 - 1)
+                key = _latent_key(latent)
+                if key not in arm_map:
+                    arm_map[key] = ArmState(idx=len(arm_map), vector=latent.clone(), key=key)
+    
+    elif args.bai_arm_builder == 'lhs':
+        # Latin Hypercube Sampling
+        from scipy.stats import qmc
+        sampler = qmc.LatinHypercube(d=intrinsic_dim, seed=args.seed)
+        samples = sampler.random(n=num_arms)
+        for sample in samples:
+            latent = _ensure_cpu_latent(torch.tensor(sample * 2 - 1, dtype=torch.float32))
+            key = _latent_key(latent)
+            if key not in arm_map:
+                arm_map[key] = ArmState(idx=len(arm_map), vector=latent.clone(), key=key)
+    
+    elif args.bai_arm_builder == 'trust_region':
+        # Trust region sampling around good initial points
+        # First get some good initial points using Sobol sampling
+        initial_samples = torch.rand((min(num_arms // 4, 16), intrinsic_dim), generator=generator)
+        trust_radius = 0.3
+        
+        for i, center in enumerate(initial_samples):
+            center_latent = _ensure_cpu_latent(center * 2 - 1)
+            key = _latent_key(center_latent)
+            if key not in arm_map:
+                arm_map[key] = ArmState(idx=len(arm_map), vector=center_latent.clone(), key=key)
+            
+            # Sample around this center
+            samples_per_center = num_arms // len(initial_samples)
+            for _ in range(samples_per_center):
+                noise = torch.randn(intrinsic_dim, generator=generator) * trust_radius
+                perturbed = center + noise
+                perturbed = torch.clamp(perturbed, 0, 1)  # Keep in [0,1]
+                latent = _ensure_cpu_latent(perturbed * 2 - 1)
+                key = _latent_key(latent)
+                if key not in arm_map:
+                    arm_map[key] = ArmState(idx=len(arm_map), vector=latent.clone(), key=key)
+    
+    elif args.bai_arm_builder == 'instruction_first':
+        # TODO: Implement instruction-first seeding
+        # For now, fall back to random sampling
+        print("[BAI] instruction_first not yet implemented, falling back to random sampling")
+        while len(arm_map) < num_arms:
+            remaining = num_arms - len(arm_map)
+            samples = torch.rand((remaining, intrinsic_dim), generator=generator)
+            for sample in samples:
+                latent = _ensure_cpu_latent(sample * 2 - 1)
+                key = _latent_key(latent)
+                if key not in arm_map:
+                    arm_map[key] = ArmState(idx=len(arm_map), vector=latent.clone(), key=key)
+    
+    else:
+        raise ValueError(f"Unknown arm builder: {args.bai_arm_builder}")
+
+    candidate_arms = sorted(arm_map.values(), key=lambda arm: arm.idx)
+
+    seed_budget = 0
+    total_budget = args.bai_total_budget
+    seed_evals = min(args.bai_seed_evals, total_budget, len(candidate_arms))
+    if seed_evals > 0:
+        for arm in candidate_arms[:seed_evals]:
+            result = model_forward_api.eval(arm.vector.clone())
+            arm.update(result[0], result[1])  # result is (score, instruction_score)
+            seed_budget += 1
+
+    return candidate_arms, arm_map, seed_budget
+
+
+def run_bai_controller(args, model_forward_api, intrinsic_dim):
+    candidate_arms, arm_map, seed_budget = _build_bai_candidates(
+        args, model_forward_api, intrinsic_dim
+    )
+    total_budget = args.bai_total_budget
+    remaining_budget = max(total_budget - seed_budget, 0)
+
+    print(
+        f"[BAI] Initialised {len(candidate_arms)} random arms; "
+        f"seed evaluations {seed_budget}/{total_budget}."
+    )
+
+    if not candidate_arms:
+        raise ValueError('No candidate arms available for BAI selection.')
+
+    print("[BAI] Initial arm means:")
+    for arm in sorted(candidate_arms, key=lambda a: a.mean if a.pulls > 0 else float('-inf'), reverse=True):
+        if arm.pulls == 0:
+            status = 'unseen'
+        else:
+            status = f"mean={arm.mean:.4f} pulls={arm.pulls}"
+        print(f"[BAI] arm={arm.idx} {status}")
+
+    def evaluate_arm(arm):
+        result = model_forward_api.eval(arm.vector.clone())
+        arm.update(result[0], result[1])  # result is (score, instruction_score)
+        return {'score': result[0], 'instruction': result[1]}
+
+    if remaining_budget <= 0:
+        print('[BAI] Budget exhausted during seeding; skipping selection loop.')
+        best_arm = max(
+            candidate_arms,
+            key=lambda a: a.mean if a.pulls > 0 else float('-inf'),
+        )
+        history = []
+    else:
+        batch_size = max(1, args.bai_batch_size)
+        if args.bai_method == 'sh':
+            best_arm, history = sequential_halving(
+                candidate_arms,
+                evaluate_arm,
+                remaining_budget,
+                batch_size,
+                logger=print,
+            )
+        elif args.bai_method == 'cr':
+            best_arm, history = continuous_reject(
+                candidate_arms,
+                evaluate_arm,
+                remaining_budget,
+                batch_size,
+                args.bai_delta,
+                logger=print,
+            )
+        elif args.bai_method == 'clst':
+            best_arm, history = cluster_bai_in_cluster(
+                candidate_arms,
+                evaluate_arm,
+                remaining_budget,
+                batch_size,
+                args.bai_num_clusters,
+                args.bai_embedding_model,
+                logger=print,
+            )
+        elif args.bai_method == 'gse':
+            best_arm, history = global_surrogate_elimination(
+                candidate_arms,
+                evaluate_arm,
+                remaining_budget,
+                batch_size,
+                args.bai_surrogate_model,
+                args.bai_embedding_model,
+                logger=print,
+            )
+        else:
+            raise ValueError(f"Unsupported BAI method: {args.bai_method}")
+
+    print('[BAI] Pull summary:')
+    for arm in sorted(candidate_arms, key=lambda a: a.idx):
+        print(
+            f"[BAI] arm={arm.idx} pulls={arm.pulls} "
+            f"mean={(arm.mean if arm.pulls > 0 else float('nan')):.4f}"
+        )
+
+    print(
+        f"[BAI] Selected arm {best_arm.idx} with mean {best_arm.mean:.4f}"
+    )
+    if best_arm.instruction:
+        print(f"[BAI] Best instruction: {best_arm.instruction}")
+
+    if model_forward_api.prompts_set:
+        best_instruction, (best_score, _) = max(
+            model_forward_api.prompts_set.items(), key=lambda item: item[1][0]
+        )
+        model_forward_api.best_instruction = best_instruction
+        model_forward_api.best_dev_perf = best_score
+        matching_arm = next(
+            (arm for arm in arm_map.values() if arm.instruction == best_instruction),
+            None,
+        )
+        if matching_arm is not None:
+            model_forward_api.best_prompt = matching_arm.vector.clone()
+
+    return best_arm, history, seed_budget, candidate_arms, arm_map
+
+
 def run(args):
     task = args.task
     HF_cache_dir = args.HF_cache_dir
@@ -468,106 +670,113 @@ def run(args):
     model_forward_api = LMForwardAPI(model_name=args.model_name, eval_data=eval_data, init_prompt=init_prompt, 
                                     init_qa=init_qa, conf=conf, base_conf=base_conf, prompt_gen_data=prompt_gen_data, random_proj=random_proj, 
                                     intrinsic_dim=intrinsic_dim, n_prompt_tokens=n_prompt_tokens, HF_cache_dir=HF_cache_dir, args=args)
+    
+    # Choose between BO and BAI based on selection argument
+    if args.selection == 'bai':
+        print(f"[SELECTION] Using BAI-FB method: {args.bai_method}")
+        print(f"[SELECTION] Total budget: {args.bai_total_budget}, Batch size: {args.bai_batch_size}")
+        best_arm, history, seed_budget, candidate_arms, arm_map = run_bai_controller(args, model_forward_api, intrinsic_dim)
+    else:
+        print("[SELECTION] Using Bayesian Optimization")
+        # start bayesian opt
+        X = SobolEngine(dimension=intrinsic_dim, scramble=True, seed=0).draw(N_INIT)
+        X_return = [model_forward_api.eval(x) for x in X]
+        Y = [X[0] for X in X_return]
+        Y_scores = [X[1].squeeze() for X in X_return]
         
-    # start bayesian opt
-    X = SobolEngine(dimension=intrinsic_dim, scramble=True, seed=0).draw(N_INIT)
-    X_return = [model_forward_api.eval(x) for x in X]
-    Y = [X[0] for X in X_return]
-    Y_scores = [X[1].squeeze() for X in X_return]
-    
-    X = X.to(**tkwargs)
-    Y = torch.FloatTensor(Y).unsqueeze(-1).to(**tkwargs)
-    Y_scores = torch.FloatTensor(np.array(Y_scores)).to(**tkwargs)
-    print(f"Best initial point: {Y.max().item():.3f}")
+        X = X.to(**tkwargs)
+        Y = torch.FloatTensor(Y).unsqueeze(-1).to(**tkwargs)
+        Y_scores = torch.FloatTensor(np.array(Y_scores)).to(**tkwargs)
+        print(f"Best initial point: {Y.max().item():.3f}")
 
-    # standardization Y (no standardization for X)
-    X_train = X
-    y_train = (Y - Y.mean(dim=-2))/(Y.std(dim=-2) + 1e-9)
-
-    # define matern kernel
-    matern_kernel = MaternKernel(
-                    nu=2.5,
-                    ard_num_dims=X_train.shape[-1],
-                    lengthscale_prior=GammaPrior(3.0, 6.0),
-                )
-    matern_kernel_instruction = MaternKernel(
-                nu=2.5,
-                ard_num_dims=Y_scores.shape[-1],
-                lengthscale_prior=GammaPrior(3.0, 6.0),
-            )
-    
-    covar_module = ScaleKernel(base_kernel=CombinedStringKernel(base_latent_kernel=matern_kernel, instruction_kernel=matern_kernel_instruction, latent_train=X_train.double(), instruction_train=Y_scores))
-    gp_model = SingleTaskGP(X_train, y_train, covar_module=covar_module)
-    gp_mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
-    
-    for i in range(N_ITERATIONS):
-        print(f"X_train shape {X_train.shape}")
-        print(f"y_train shape {y_train.shape}")
-
-        start_time = time.time()
-
-        fit_gpytorch_model(gp_mll)#, options = {'maxiter':10})
-        print(f"Fitting done in {time.time()-start_time}")
-        start_time = time.time()
-        EI = ExpectedImprovement(gp_model, best_f = y_train.max().item())
-        
-        starting_idxs = torch.argsort(-1*y_train.squeeze())[:BATCH_SIZE]
-        starting_points = X_train[starting_idxs]
-
-
-        best_points = []
-        best_vals = []
-        for starting_point_for_cma in starting_points:
-            if (torch.max(starting_point_for_cma) > 1 or torch.min(starting_point_for_cma) < -1):
-                continue
-            newp, newv = cma_es_concat(starting_point_for_cma, EI, tkwargs)
-            best_points.append(newp)
-            best_vals.append(newv)
-            
-        print(f"best point {best_points[np.argmax(best_vals)]} \n with EI value {np.max(best_vals)}")
-        print(f"Time for CMA-ES {time.time() - start_time}")
-        for idx in np.argsort(-1*np.array(best_vals)):
-            X_next_point =  torch.from_numpy(best_points[idx]).float().unsqueeze(0)
-            # Y_next_point = [model_forward_api.eval(X_next_point)]
-            
-            X_next_points_return = [model_forward_api.eval(X_next_point)]
-            Y_next_point = [X[0] for X in X_next_points_return]
-            Y_scores_next_points = [X[1].squeeze() for X in X_next_points_return]
-    
-            X_next_point = X_next_point.to(**tkwargs)
-            Y_next_point = torch.FloatTensor(Y_next_point).unsqueeze(-1).to(**tkwargs)
-            Y_scores_next_points = torch.FloatTensor(np.array(Y_scores_next_points)).to(**tkwargs)
-
-            X = torch.cat([X, X_next_point])
-            Y = torch.cat([Y, Y_next_point])
-            Y_scores = torch.cat([Y_scores, Y_scores_next_points])
-
-        # standardization Y
-        X_train = X.clone()
+        # standardization Y (no standardization for X)
+        X_train = X
         y_train = (Y - Y.mean(dim=-2))/(Y.std(dim=-2) + 1e-9)
 
+        # define matern kernel
         matern_kernel = MaternKernel(
                         nu=2.5,
                         ard_num_dims=X_train.shape[-1],
                         lengthscale_prior=GammaPrior(3.0, 6.0),
                     )
         matern_kernel_instruction = MaternKernel(
-                nu=2.5,
-                ard_num_dims=Y_scores.shape[-1],
-                lengthscale_prior=GammaPrior(3.0, 6.0),
-            )
+                    nu=2.5,
+                    ard_num_dims=Y_scores.shape[-1],
+                    lengthscale_prior=GammaPrior(3.0, 6.0),
+                )
+        
         covar_module = ScaleKernel(base_kernel=CombinedStringKernel(base_latent_kernel=matern_kernel, instruction_kernel=matern_kernel_instruction, latent_train=X_train.double(), instruction_train=Y_scores))
         gp_model = SingleTaskGP(X_train, y_train, covar_module=covar_module)
         gp_mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
-        print(f"Best value found till now: {torch.max(Y)}")
+        
+        for i in range(N_ITERATIONS):
+            print(f"X_train shape {X_train.shape}")
+            print(f"y_train shape {y_train.shape}")
 
-    print('Evaluate on test data...')
-    prompts = model_forward_api.return_best_prompt()
-    print("Best instruction is:")
-    print(prompts)
+            start_time = time.time()
 
-    print("The final instruction set is:")
-    print(model_forward_api.return_prompts_set())
+            fit_gpytorch_model(gp_mll)#, options = {'maxiter':10})
+            print(f"Fitting done in {time.time()-start_time}")
+            start_time = time.time()
+            EI = ExpectedImprovement(gp_model, best_f = y_train.max().item())
+            
+            starting_idxs = torch.argsort(-1*y_train.squeeze())[:BATCH_SIZE]
+            starting_points = X_train[starting_idxs]
+
+
+            best_points = []
+            best_vals = []
+            for starting_point_for_cma in starting_points:
+                if (torch.max(starting_point_for_cma) > 1 or torch.min(starting_point_for_cma) < -1):
+                    continue
+                newp, newv = cma_es_concat(starting_point_for_cma, EI, tkwargs)
+                best_points.append(newp)
+                best_vals.append(newv)
+                
+            print(f"best point {best_points[np.argmax(best_vals)]} \n with EI value {np.max(best_vals)}")
+            print(f"Time for CMA-ES {time.time() - start_time}")
+            for idx in np.argsort(-1*np.array(best_vals)):
+                X_next_point =  torch.from_numpy(best_points[idx]).float().unsqueeze(0)
+                # Y_next_point = [model_forward_api.eval(X_next_point)]
+                
+                X_next_points_return = [model_forward_api.eval(X_next_point)]
+                Y_next_point = [X[0] for X in X_next_points_return]
+                Y_scores_next_points = [X[1].squeeze() for X in X_next_points_return]
+        
+                X_next_point = X_next_point.to(**tkwargs)
+                Y_next_point = torch.FloatTensor(Y_next_point).unsqueeze(-1).to(**tkwargs)
+                Y_scores_next_points = torch.FloatTensor(np.array(Y_scores_next_points)).to(**tkwargs)
+
+                X = torch.cat([X, X_next_point])
+                Y = torch.cat([Y, Y_next_point])
+                Y_scores = torch.cat([Y_scores, Y_scores_next_points])
+
+            # standardization Y
+            X_train = X.clone()
+            y_train = (Y - Y.mean(dim=-2))/(Y.std(dim=-2) + 1e-9)
+
+            matern_kernel = MaternKernel(
+                            nu=2.5,
+                            ard_num_dims=X_train.shape[-1],
+                            lengthscale_prior=GammaPrior(3.0, 6.0),
+                        )
+            matern_kernel_instruction = MaternKernel(
+                    nu=2.5,
+                    ard_num_dims=Y_scores.shape[-1],
+                    lengthscale_prior=GammaPrior(3.0, 6.0),
+                )
+            covar_module = ScaleKernel(base_kernel=CombinedStringKernel(base_latent_kernel=matern_kernel, instruction_kernel=matern_kernel_instruction, latent_train=X_train.double(), instruction_train=Y_scores))
+            gp_model = SingleTaskGP(X_train, y_train, covar_module=covar_module)
+            gp_mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
+            print(f"Best value found till now: {torch.max(Y)}")
+
+        print('Evaluate on test data...')
+        prompts = model_forward_api.return_best_prompt()
+        print("Best instruction is:")
+        print(prompts)
+
+        print("The final instruction set is:")
+        print(model_forward_api.return_prompts_set())
 
     # Evaluate on test data
     print('Evaluating on test data...')
